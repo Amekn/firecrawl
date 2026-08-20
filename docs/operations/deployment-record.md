@@ -100,3 +100,45 @@ The retry changed exactly one runtime setting: `NUQ_WORKER_COUNT: "1"` was added
 - `scripts/verify-local.sh` was not run because the gateway health gate failed.
 - Existing Nextcloud, Open WebUI, Open Terminal, SearXNG, and stateful Firecrawl container identities/images/ports were unchanged and healthy. Tailscale serve JSON was byte-for-byte unchanged (SHA-256 `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070`).
 - The retry is therefore **BLOCKED**, with no further retry permitted under the one-variable controlled-retry rule.
+
+## Task 6 continuation: gateway tmpfs permissions retry
+
+**DONE_WITH_CONCERNS — the gateway retry passed all runtime gates.** Compose still emits repeated warnings for unset optional variables; they did not affect the verified deployment.
+
+### Diagnosis and one-variable fix
+
+The prior gateway retry used the pinned unprivileged Nginx image (uid/gid 101) with default tmpfs mounts. Its entrypoint reported that `/etc/nginx/conf.d` was not writable, so Nginx generated no usable listener even though `nginx -t` passed. The controlled fix changed only the three gateway `tmpfs` entries in `compose.the-dream-land.yaml` and added the matching Compose invariant in `deploy/tests/test_compose.py`:
+
+```text
+/tmp:uid=101,gid=101,mode=1777
+/var/cache/nginx:uid=101,gid=101,mode=0755
+/etc/nginx/conf.d:uid=101,gid=101,mode=0755
+```
+
+No image, `read_only`, capabilities, ports, resources, API settings, or Nginx template changed. The source commit before this retry was `2a2163210d98150741bbc0103f04ff93357fb431`.
+
+### TDD and static/config gates
+
+- RED: `python3 -m unittest deploy.tests.test_compose.ComposeInvariantTests.test_gateway_tmpfs_entries_are_uid_gid_and_mode_pinned -v` failed as expected because Compose rendered `['/tmp', '/var/cache/nginx', '/etc/nginx/conf.d']` instead of the required option-pinned entries.
+- GREEN: the focused invariant passed.
+- Full deploy suite: **PASS**, 29 tests.
+- Static checks: `python3 -m compileall -q deploy/tests` and `git diff --check`: **PASS**.
+- Merged Compose config: **PASS**; rendered gateway tmpfs entries matched the required list. Compose emitted only the existing unset-optional-variable warnings.
+
+### Runtime and acceptance gates
+
+- `scripts/resource-guard.sh pre`: **PASS** before recreation and before each staged new-runtime start. Available RAM ranged from 10 GiB before start to 8.6–9 GiB during startup; swap remained approximately 2.8–2.9 GiB used of 8 GiB.
+- Only `playwright-service`, `api`, and `gateway` were removed/recreated, using `--no-deps`; NuQ PostgreSQL, Redis, and RabbitMQ were not recreated.
+- Final new-runtime state: Playwright running (restart count 0); API running/healthy (restart count 0); gateway running/healthy (restart count 0).
+- Gateway runtime tmpfs inspection exactly matched the three required path/options; the container ran as uid/gid 101 and actual mount ownership was 101:101 with modes 1777/0755/0755.
+- Generated `/etc/nginx/conf.d/default.conf` was non-empty. `nginx -t` passed, `nginx -T` contained `listen 8080;` and `proxy_pass http://api:3002;`, and gateway logs contained no write/config error markers.
+- `scripts/verify-local.sh`: **PASS** — healthz 200, unauthenticated and wrong-key readiness 401, keyed readiness 200, search 200 with results, scrape 200 with Markdown, and SearXNG log marker present.
+- `scripts/resource-guard.sh post`: **PASS** — 8.7 GiB available RAM; swap approximately 2.8 GiB used of 8 GiB.
+
+Final runtime memory snapshot: Playwright `215 MiB / 2 GiB`, API `1.562 GiB / 3 GiB`, gateway `11.79 MiB / 128 MiB`. Final container IDs were `653e6acac228754110f3b34565d578ca0c536b50a0e8b411ce1e58e9076a85f4` (Playwright), `a3f2be411c692ceaf4c99290f55fe1db0f41c561bf57525c2f97cd737999bad2` (API), and `ee4ea0abd54356dafd3c35e315a250397d9691cbf84653adc16a6dbe343dc342` (gateway).
+
+### Protected-state verification
+
+- NuQ PostgreSQL, Redis, RabbitMQ, all Nextcloud containers, Open WebUI, Open Terminal, and SearXNG retained identical pre/post container IDs, images, and statuses; stateful Firecrawl services remained healthy.
+- Tailscale serve JSON was byte-for-byte unchanged: pre/post SHA-256 `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070`.
+- No Open WebUI, Tailscale, Funnel, existing-service, or volume mutation was performed.
