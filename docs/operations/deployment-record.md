@@ -2,19 +2,21 @@
 
 ## Result
 
-**BLOCKED — runtime health gate failed before local verification.**
+**DONE_WITH_CONCERNS — the final controlled deployment passed all runtime and acceptance gates.**
 
-This record documents the Task 6 local deployment attempt. The stateful services started healthy, but the API did not become healthy and the gateway was not started. Open WebUI and Tailscale were not modified or started by this attempt.
+This record's authoritative outcome is the final gateway tmpfs-permissions retry at deployed configuration commit `b8ecea16a6e397ccd82f783c7b00e524524ae0c2`. The API and gateway were both healthy at `2026-08-20T23:38:46+12:00`; local verification and the post resource guard passed. Compose still reports the explicitly inventoried unset variables below, so the result remains `DONE_WITH_CONCERNS` rather than an unqualified production-readiness claim. Earlier `BLOCKED` and `NOT RUN` results are retained below as historical attempts and do not describe the final state. Open WebUI and Tailscale were not modified or started by this deployment.
 
 ## Source and timing
 
-- Firecrawl git describe: `v2.11.162-14-gbcdc66d`
-- Source commit before deployment: `bcdc66de0c6ff518dff61b1ee0721a7791337c37`
+- Firecrawl git describe before the initial attempt: `v2.11.162-14-gbcdc66d`
+- Source commit before the initial attempt: `bcdc66de0c6ff518dff61b1ee0721a7791337c37`
+- Final deployed configuration commit: `b8ecea16a6e397ccd82f783c7b00e524524ae0c2`
 - Branch: `local/the-dream-land-deployment`
-- Pre-state capture: `2026-08-20T22:47:55+12:00`
-- Stateful-service start: `2026-08-20T23:08:01+12:00`
-- Runtime/gateway start attempt: `2026-08-20T23:08:27+12:00`
-- Failure cleanup: only the newly-created API and Playwright containers were stopped; stateful Firecrawl services remain running.
+- Initial pre-state capture: `2026-08-20T22:47:55+12:00`
+- Initial stateful-service start: `2026-08-20T23:08:01+12:00`
+- Initial runtime/gateway start attempt: `2026-08-20T23:08:27+12:00`
+- Final successful API/gateway health: `2026-08-20T23:38:46+12:00`
+- Initial failure cleanup: only the newly-created API and Playwright containers were stopped; stateful Firecrawl services remained running.
 
 ## Generated files
 
@@ -42,17 +44,46 @@ Build base digests observed:
 
 ## Gates and verification
 
-- Deploy unit tests: **PASS**, 28 tests.
-- Merged Compose config: **PASS**; Compose emitted warnings for unset optional variables only.
-- Pre resource guard: **PASS** at every required static, pull, and build checkpoint; available RAM remained at or above 10 GiB at those checkpoints.
+- Final deploy unit tests: **PASS**, 29 tests.
+- Final merged Compose config: **PASS**; the unset-variable warnings are enumerated and classified below.
+- Final pre resource guards: **PASS** at every required static, pull, build, recreation, and staged-start checkpoint; available RAM remained above the configured threshold.
 - Direct image pulls: **PASS**, sequentially for Redis, RabbitMQ, and gateway.
 - Source builds: **PASS**, sequentially for NuQ PostgreSQL, Playwright, and API. The first foreground API build call timed out in the tool after partial progress; the retried background build completed successfully and its resource guard passed.
-- Stateful health: **PASS** — NuQ PostgreSQL, Redis, and RabbitMQ healthy; FoundationDB absent.
-- API/gateway health: **FAIL** — API remained unhealthy through the health wait; gateway remained created and never started.
-- Local verification (`scripts/verify-local.sh`): **NOT RUN** because the required runtime health gate failed.
-- Post resource guard (`scripts/resource-guard.sh post`): **NOT RUN** because local verification was not reached.
+- Stateful health: **PASS** — NuQ PostgreSQL, Redis, and RabbitMQ healthy; FoundationDB absent from the active local profile.
+- Final API/gateway health: **PASS** at `2026-08-20T23:38:46+12:00` — Playwright running, API running/healthy, and gateway running/healthy, all with restart count 0.
+- Local verification (`scripts/verify-local.sh`): **PASS** — healthz 200, readiness 401/401/200, search results, scrape Markdown, and SearXNG evidence.
+- Post resource guard (`scripts/resource-guard.sh post`): **PASS** — 8.7 GiB available RAM; swap approximately 2.8 GiB used of 8 GiB.
 
-## Container outcome
+## Compose unset-variable warning inventory
+
+The final read-only `scripts/compose.sh config --quiet` check emitted repeated warnings of the form `variable is not set; defaulting to a blank string`. The names below are the complete **20-name deduplicated inventory**; Compose repeated some names because they are interpolated in more than one merged service. Every warning is classified as either intentionally optional/out-of-scope for this local acceptance or PostgreSQL-default behavior. No warning caused the Compose config gate or final runtime gates to fail.
+
+| Unset variable | Classification | Local deployment interpretation |
+|---|---|---|
+| `ALLOW_LOCAL_WEBHOOKS` | Intentionally optional / out-of-scope | Webhook policy setting; no webhook integration was required by Task 6 acceptance. |
+| `AUTUMN_SECRET_KEY` | Intentionally optional / out-of-scope | Optional Autumn integration secret; not used by this local stack. |
+| `BULL_AUTH_KEY` | Intentionally optional / out-of-scope | Optional Bull dashboard/auth integration; not used by this local stack. |
+| `MODEL_EMBEDDING_NAME` | Intentionally optional / out-of-scope | Optional model/embedding configuration; no AI provider was required by local acceptance. |
+| `MODEL_NAME` | Intentionally optional / out-of-scope | Optional model configuration; no AI provider was required by local acceptance. |
+| `OLLAMA_BASE_URL` | Intentionally optional / out-of-scope | Optional Ollama provider endpoint; not used by this local stack. |
+| `OPENAI_API_KEY` | Intentionally optional / out-of-scope | Optional OpenAI credential; intentionally absent and not needed for local acceptance. |
+| `OPENAI_BASE_URL` | Intentionally optional / out-of-scope | Optional OpenAI-compatible endpoint; not used by this local stack. |
+| `PROXY_PASSWORD` | Intentionally optional / out-of-scope | Optional outbound proxy credential; direct local connectivity was used. |
+| `PROXY_SERVER` | Intentionally optional / out-of-scope | Optional outbound proxy; direct local connectivity was used. |
+| `PROXY_USERNAME` | Intentionally optional / out-of-scope | Optional outbound proxy credential; direct local connectivity was used. |
+| `SEARXNG_CATEGORIES` | Intentionally optional / out-of-scope | Optional SearXNG tuning; the configured endpoint and SearXNG activity check passed without it. |
+| `SEARXNG_ENGINES` | Intentionally optional / out-of-scope | Optional SearXNG tuning; the configured endpoint and SearXNG activity check passed without it. |
+| `SELF_HOSTED_WEBHOOK_URL` | Intentionally optional / out-of-scope | Optional self-hosted webhook integration; not required by local acceptance. |
+| `SLACK_WEBHOOK_URL` | Intentionally optional / out-of-scope | Optional Slack notification integration; not used by this local stack. |
+| `SUPABASE_ANON_TOKEN` | Intentionally optional / out-of-scope | Optional Supabase integration credential; not used by this local stack. |
+| `SUPABASE_SERVICE_TOKEN` | Intentionally optional / out-of-scope | Optional Supabase integration credential; not used by this local stack. |
+| `SUPABASE_URL` | Intentionally optional / out-of-scope | Optional Supabase integration endpoint; not used by this local stack. |
+| `TEST_API_KEY` | Intentionally optional / out-of-scope | Optional test/integration credential; not required by the verified local checks. |
+| `NUQ_BACKEND` | PostgreSQL-default behavior | Blank selects the default PostgreSQL queue path; the `nuq-postgres` service was healthy and the FoundationDB profile was not enabled. |
+
+Source interpolation sites are the bare optional references in `docker-compose.yaml:38-59,70-74`. The defaulted PostgreSQL variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, and `POSTGRES_PORT`) did not warn and retain their documented defaults.
+
+## Historical initial attempt — container outcome
 
 | Service | Container ID | Final state | Health |
 |---|---|---|---|
@@ -63,7 +94,7 @@ Build base digests observed:
 | `api` | `8bc4a53caa5c99ec9f58a2620fce1cff72b39dec6012ce5ca2935c2188339157` | exited (137) | unhealthy; restart loop observed |
 | `gateway` | `9b77945aa74d8db832e094c2fc54bf9b9dad599e6ca723afcc7891cfac368724` | created | not started |
 
-## Memory and swap
+## Historical initial attempt — memory and swap
 
 | Snapshot | Available RAM | Swap used / total |
 |---|---:|---:|
@@ -74,7 +105,7 @@ Build base digests observed:
 
 The post guard was intentionally not invoked, so the final raw snapshot is not a post-guard PASS claim.
 
-## Concerns and follow-up
+## Historical initial attempt — concerns and follow-up
 
 - API startup repeatedly spawned the configured NuQ worker set and worker processes exited with status 137; the API health check never became healthy. The API container was limited to 3 GiB and reached approximately 2.5 GiB during diagnosis.
 - The deployment configuration exposes `NUM_WORKERS_PER_QUEUE`, but the API harness also uses a separate `NUQ_WORKER_COUNT` setting whose default is five. This was not changed during the aborted deployment; review and explicitly configure the runtime worker count or memory budget before retrying.
@@ -82,9 +113,9 @@ The post guard was intentionally not invoked, so the final raw snapshot is not a
 - No Open WebUI, Tailscale, Funnel, or existing Nextcloud container was started, stopped, restarted, or modified. The pre/post Tailscale serve JSON snapshots were byte-for-byte unchanged, and the existing container IDs/statuses remained healthy.
 - Port `127.0.0.1:3002` is unused after cleanup. Stateful Firecrawl containers and their named volumes remain present; no `docker compose down` or volume deletion was performed.
 
-## Task 6 continuation: one-variable controlled retry
+## Historical controlled retry — NuQ worker-count fix
 
-**BLOCKED — API recovered, but the gateway health gate failed.**
+**Historical BLOCKED attempt — API recovered, but the gateway health gate failed.**
 
 The retry changed exactly one runtime setting: `NUQ_WORKER_COUNT: "1"` was added to `api.environment` in `compose.the-dream-land.yaml`. No memory limit, CPU limit, concurrency value, or other resource setting was changed.
 
@@ -99,9 +130,9 @@ The retry changed exactly one runtime setting: `NUQ_WORKER_COUNT: "1"` was added
 - Cleanup: only the newly recreated `api`, `playwright-service`, and `gateway` containers were stopped. NuQ PostgreSQL, Redis, and RabbitMQ remained healthy.
 - `scripts/verify-local.sh` was not run because the gateway health gate failed.
 - Existing Nextcloud, Open WebUI, Open Terminal, SearXNG, and stateful Firecrawl container identities/images/ports were unchanged and healthy. Tailscale serve JSON was byte-for-byte unchanged (SHA-256 `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070`).
-- The retry is therefore **BLOCKED**, with no further retry permitted under the one-variable controlled-retry rule.
+- That retry was therefore **BLOCKED**, with no further retry permitted under that one-variable retry rule; the separately scoped gateway tmpfs remediation recorded below became the authoritative final attempt.
 
-## Task 6 continuation: gateway tmpfs permissions retry
+## Final controlled retry — gateway tmpfs permissions
 
 **DONE_WITH_CONCERNS — the gateway retry passed all runtime gates.** Compose still emits repeated warnings for unset optional variables; they did not affect the verified deployment.
 
