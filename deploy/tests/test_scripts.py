@@ -41,6 +41,50 @@ class DeploymentScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_backup_and_restore_scripts_have_cold_backup_safety_controls(self) -> None:
+        backup = SCRIPTS_DIR / "backup.sh"
+        restore = SCRIPTS_DIR / "restore.sh"
+        backup_text = backup.read_text(encoding="utf-8")
+        restore_text = restore.read_text(encoding="utf-8")
+
+        for text, name in ((backup_text, "backup.sh"), (restore_text, "restore.sh")):
+            self.assertIn('source "$ROOT/.env"', text, name)
+            self.assertIn("BACKUP_HELPER_IMAGE", text, name)
+            self.assertNotRegex(text, r"(?m)^\\s*set\\s+-x(?:\\s|$)", name)
+
+        self.assertIn("--leave-stopped", backup_text)
+        self.assertIn("--output", backup_text)
+        self.assertIn("git rev-parse HEAD", backup_text)
+        self.assertIn("sha256sum", backup_text)
+        self.assertIn("pre-restore", restore_text)
+        self.assertIn("--confirm", restore_text)
+        self.assertIn("docker volume inspect", backup_text)
+        self.assertIn("docker run --rm", backup_text)
+
+    def test_restore_without_arguments_rejects_before_calling_docker(self) -> None:
+        restore = SCRIPTS_DIR / "restore.sh"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_bin = Path(temporary_directory) / "bin"
+            fake_bin.mkdir()
+            docker_called = Path(temporary_directory) / "docker-called"
+            (fake_bin / "docker").write_text(
+                "#!/usr/bin/env bash\\nprintf 'docker called\\n' > %s\\nexit 99\\n" % docker_called,
+                encoding="utf-8",
+            )
+            (fake_bin / "docker").chmod(0o700)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+            result = subprocess.run(
+                ["bash", str(restore)],
+                cwd=REPO_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(docker_called.exists(), result.stdout + result.stderr)
+
     def test_verification_scripts_do_not_print_api_key(self) -> None:
         for script in VERIFICATION_SCRIPTS:
             text = script.read_text(encoding="utf-8")
