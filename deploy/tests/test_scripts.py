@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -24,6 +28,225 @@ VERIFICATION_SCRIPTS = (
 
 
 class DeploymentScriptTests(unittest.TestCase):
+    @contextmanager
+    def _temporary_dotenv(self):
+        env_file = REPO_ROOT / ".env"
+        previous = env_file.read_bytes() if env_file.exists() else None
+        env_file.write_text("BACKUP_HELPER_IMAGE=mock/helper:task5\n", encoding="utf-8")
+        try:
+            yield
+        finally:
+            if previous is None:
+                env_file.unlink(missing_ok=True)
+            else:
+                env_file.write_bytes(previous)
+
+    def _mock_runtime(self, root: Path, running: str = "") -> tuple[dict[str, str], Path]:
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        log = root / "mock.log"
+        docker = fake_bin / "docker"
+        docker.write_text(
+            textwrap.dedent(
+                r"""
+                #!/usr/bin/env python3
+                import os
+                from pathlib import Path
+                import re
+                import tarfile
+                import sys
+
+                args = sys.argv[1:]
+                log = Path(os.environ["MOCK_LOG"])
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write("docker " + " ".join(args) + "\n")
+
+                def mount_path(suffix):
+                    for index, value in enumerate(args[:-1]):
+                        if value == "-v" and args[index + 1].endswith(suffix):
+                            return args[index + 1][:-len(suffix)]
+                    raise SystemExit("missing mount " + suffix)
+
+                if args[:2] == ["ps", "--filter"]:
+                    running = os.environ.get("MOCK_RUNNING_CONTAINERS", "")
+                    if running:
+                        print(running)
+                    raise SystemExit(0)
+                if args[:2] == ["volume", "inspect"]:
+                    raise SystemExit(0)
+                if args[:1] == ["inspect"]:
+                    print(os.environ.get("MOCK_HEALTH", "healthy"))
+                    raise SystemExit(0)
+                if args[:2] == ["run", "--rm"]:
+                    command = args[-1]
+                    if "tar -czf /backup/" in command:
+                        archive = re.search(r"/backup/([a-z-]+\.tar\.gz)", command).group(1)
+                        backup_path = Path(mount_path(":/backup")) / archive
+                        with tarfile.open(backup_path, "w:gz") as stream:
+                            info = tarfile.TarInfo("mock-data.txt")
+                            payload = b"mock backup data\n"
+                            info.size = len(payload)
+                            stream.addfile(info, __import__("io").BytesIO(payload))
+                        raise SystemExit(0)
+                    if "tar -tzf /backup/" in command:
+                        if os.environ.get("MOCK_DOCKER_FAIL_STAGE") == "preflight":
+                            raise SystemExit(41)
+                        archive = re.search(r"/backup/([a-z-]+\.tar\.gz)", command).group(1)
+                        try:
+                            with tarfile.open(Path(mount_path(":/backup:ro")) / archive, "r:gz") as stream:
+                                stream.getnames()
+                        except (OSError, tarfile.TarError):
+                            raise SystemExit(42)
+                        raise SystemExit(0)
+                    if "find /target" in command:
+                        with log.open("a", encoding="utf-8") as stream:
+                            stream.write("docker-clear\n")
+                        if os.environ.get("MOCK_DOCKER_FAIL_STAGE") == "clear":
+                            raise SystemExit(43)
+                        raise SystemExit(0)
+                    if "tar -xzf /backup/" in command:
+                        with log.open("a", encoding="utf-8") as stream:
+                            stream.write("docker-extract\n")
+                        if os.environ.get("MOCK_DOCKER_FAIL_STAGE") == "extract":
+                            raise SystemExit(44)
+                        raise SystemExit(0)
+                raise SystemExit(0)
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        docker.chmod(0o700)
+
+        compose = root / "compose.sh"
+        compose.write_text(
+            textwrap.dedent(
+                r"""
+                #!/usr/bin/env python3
+                import os
+                from pathlib import Path
+                import sys
+
+                args = sys.argv[1:]
+                log = Path(os.environ["MOCK_LOG"])
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write("compose " + " ".join(args) + "\n")
+                if args[:1] == ["version"]:
+                    print("mock-compose-v1")
+                    raise SystemExit(0)
+                if args[:1] == ["ps"]:
+                    print("mock-container-" + args[-1])
+                    raise SystemExit(0)
+                if args[:1] == ["up"] and "nuq-postgres" in args and os.environ.get("MOCK_COMPOSE_FAIL_STAGE") in {"stateful-up", "start"}:
+                    raise SystemExit(51)
+                if args[:1] == ["stop"] and os.environ.get("MOCK_COMPOSE_FAIL_STAGE") == "cleanup-stop":
+                    raise SystemExit(52)
+                if args[:1] == ["up"] and "nuq-postgres" not in args and os.environ.get("MOCK_COMPOSE_FAIL_STAGE") == "application-up":
+                    raise SystemExit(53)
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        compose.chmod(0o700)
+
+        resource_guard = root / "resource-guard.sh"
+        resource_guard.write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'resource-%s\\n' \"$1\" >> \"$MOCK_LOG\"\n",
+            encoding="utf-8",
+        )
+        resource_guard.chmod(0o700)
+
+        verifier = root / "verify-local.sh"
+        verifier.write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'verify\\n' >> \"$MOCK_LOG\"\nif [[ \"${MOCK_DOCKER_FAIL_STAGE:-}\" == verify ]]; then exit 61; fi\n",
+            encoding="utf-8",
+        )
+        verifier.chmod(0o700)
+
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}:{environment['PATH']}",
+                "MOCK_LOG": str(log),
+                "MOCK_RUNNING_CONTAINERS": running,
+                "FIRECRAWL_COMPOSE_SCRIPT": str(compose),
+                "FIRECRAWL_RESOURCE_GUARD_SCRIPT": str(resource_guard),
+                "FIRECRAWL_VERIFY_LOCAL_SCRIPT": str(verifier),
+                "FIRECRAWL_HEALTH_TIMEOUT_SECONDS": "2",
+            }
+        )
+        return environment, log
+
+    @contextmanager
+    def _backup_fixture(self, *, malformed: bool = False, missing_checksum: bool = False, extra_checksum: bool = False):
+        backup_root = REPO_ROOT / "backups"
+        root_existed = backup_root.exists()
+        backup_root.mkdir(mode=0o700, exist_ok=True)
+        before = set(backup_root.iterdir())
+        temporary = tempfile.TemporaryDirectory(prefix="task5-", dir=backup_root)
+        backup_dir = Path(temporary.name)
+        archive_names = ("postgres.tar.gz", "redis.tar.gz", "rabbitmq.tar.gz")
+        try:
+            for archive in archive_names:
+                archive_path = backup_dir / archive
+                if malformed:
+                    archive_path.write_bytes(b"not a tar archive\n")
+                else:
+                    with tarfile.open(archive_path, "w:gz") as stream:
+                        info = tarfile.TarInfo("fixture.txt")
+                        payload = b"fixture data\n"
+                        info.size = len(payload)
+                        stream.addfile(info, __import__("io").BytesIO(payload))
+            if extra_checksum:
+                extra = backup_dir / "unexpected.tar.gz"
+                with tarfile.open(extra, "w:gz") as stream:
+                    info = tarfile.TarInfo("unexpected.txt")
+                    payload = b"unexpected\n"
+                    info.size = len(payload)
+                    stream.addfile(info, __import__("io").BytesIO(payload))
+            (backup_dir / "manifest.txt").write_text(
+                "Git commit: fixture\n"
+                "Git describe: fixture\n"
+                "Compose version: fixture\n"
+                "Volume: firecrawl-postgres-data -> postgres.tar.gz\n"
+                "Volume: firecrawl-redis-data -> redis.tar.gz\n"
+                "Volume: firecrawl-rabbitmq-data -> rabbitmq.tar.gz\n"
+                "UTC timestamp: 20260820T000000Z\n",
+                encoding="utf-8",
+            )
+            checksummed = archive_names[:2] if missing_checksum else archive_names
+            if extra_checksum:
+                checksummed += ("unexpected.tar.gz",)
+            checksum_lines = []
+            for archive in checksummed:
+                digest = hashlib.sha256((backup_dir / archive).read_bytes()).hexdigest()
+                checksum_lines.append(f"{digest}  {archive}")
+            (backup_dir / "SHA256SUMS").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+            yield backup_dir, Path("backups") / backup_dir.name
+        finally:
+            temporary.cleanup()
+            for child in set(backup_root.iterdir()) - before:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink(missing_ok=True)
+            if not root_existed and backup_root.exists() and not any(backup_root.iterdir()):
+                backup_root.rmdir()
+
+    def _run_script(self, script: Path, args: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(script), *args],
+            cwd=REPO_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _log_lines(self, log: Path) -> list[str]:
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
     def test_shell_scripts_are_strict_and_syntax_checked(self) -> None:
         for script in SHELL_SCRIPTS:
             self.assertTrue(script.is_file(), f"missing script: {script}")
@@ -50,11 +273,11 @@ class DeploymentScriptTests(unittest.TestCase):
         for text, name in ((backup_text, "backup.sh"), (restore_text, "restore.sh")):
             self.assertIn('source "$ROOT/.env"', text, name)
             self.assertIn("BACKUP_HELPER_IMAGE", text, name)
-            self.assertNotRegex(text, r"(?m)^\\s*set\\s+-x(?:\\s|$)", name)
+            self.assertNotRegex(text, r"(?m)^\s*set\s+-x(?:\s|$)", name)
 
         self.assertIn("--leave-stopped", backup_text)
         self.assertIn("--output", backup_text)
-        self.assertIn("git rev-parse HEAD", backup_text)
+        self.assertIn('git -C "$ROOT" rev-parse HEAD', backup_text)
         self.assertIn("sha256sum", backup_text)
         self.assertIn("pre-restore", restore_text)
         self.assertIn("--confirm", restore_text)
@@ -68,7 +291,7 @@ class DeploymentScriptTests(unittest.TestCase):
             fake_bin.mkdir()
             docker_called = Path(temporary_directory) / "docker-called"
             (fake_bin / "docker").write_text(
-                "#!/usr/bin/env bash\\nprintf 'docker called\\n' > %s\\nexit 99\\n" % docker_called,
+                "#!/usr/bin/env bash\nprintf 'docker called\\n' > %s\nexit 99\n" % docker_called,
                 encoding="utf-8",
             )
             (fake_bin / "docker").chmod(0o700)
@@ -84,6 +307,200 @@ class DeploymentScriptTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(docker_called.exists(), result.stdout + result.stderr)
+
+    def test_restore_invalid_argument_forms_reject_before_calling_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_bin = Path(temporary_directory) / "bin"
+            fake_bin.mkdir()
+            docker_called = Path(temporary_directory) / "docker-called"
+            (fake_bin / "docker").write_text(
+                "#!/usr/bin/env bash\nprintf 'docker called\\n' > %s\nexit 99\n" % docker_called,
+                encoding="utf-8",
+            )
+            (fake_bin / "docker").chmod(0o700)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+            for arguments in (("--confirm",), ("backups/missing",), ("backups/missing", "--confirm", "extra"), ("backups/missing", "wrong")):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        ["bash", str(SCRIPTS_DIR / "restore.sh"), *arguments],
+                        cwd=REPO_ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(docker_called.exists(), result.stdout + result.stderr)
+
+    def test_mocked_backup_and_restore_flow_covers_artifacts_order_and_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            with self._backup_fixture() as (backup_dir, backup_argument):
+                output_argument = backup_argument.with_name(backup_dir.name + "-output")
+                output_dir = REPO_ROOT / output_argument
+                backup = self._run_script(
+                    SCRIPTS_DIR / "backup.sh",
+                    ["--leave-stopped", "--output", str(output_argument)],
+                    environment,
+                )
+                self.assertEqual(backup.returncode, 0, backup.stderr)
+                self.assertEqual(output_dir.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(
+                    sorted(path.name for path in output_dir.glob("*.tar.gz")),
+                    ["postgres.tar.gz", "rabbitmq.tar.gz", "redis.tar.gz"],
+                )
+                self.assertTrue((output_dir / "manifest.txt").is_file())
+                self.assertTrue((output_dir / "SHA256SUMS").is_file())
+                lines = self._log_lines(log)
+                self.assertLess(lines.index("compose stop gateway api playwright-service"), lines.index("compose stop redis rabbitmq nuq-postgres"))
+                self.assertFalse(any(line.startswith("compose up") for line in lines))
+
+                restore = self._run_script(
+                    SCRIPTS_DIR / "restore.sh",
+                    [str(output_argument), "--confirm"],
+                    environment,
+                )
+                self.assertEqual(restore.returncode, 0, restore.stderr)
+                lines = self._log_lines(log)
+                ps_index = next(index for index, line in enumerate(lines) if line.startswith("docker ps "))
+                safety_backup_index = next(index for index, line in enumerate(lines[ps_index + 1:], ps_index + 1) if line == "resource-pre")
+                clear_index = lines.index("docker-clear")
+                stateful_up_index = next(index for index, line in enumerate(lines[clear_index + 1:], clear_index + 1) if line == "compose up -d nuq-postgres redis rabbitmq")
+                application_up_index = next(index for index, line in enumerate(lines[stateful_up_index + 1:], stateful_up_index + 1) if line == "compose up -d playwright-service api gateway")
+                self.assertLess(ps_index, safety_backup_index)
+                self.assertLess(safety_backup_index, clear_index)
+                self.assertLess(clear_index, stateful_up_index)
+                self.assertLess(stateful_up_index, application_up_index)
+                self.assertIn("compose ps -q nuq-postgres", lines)
+                self.assertIn("compose ps -q redis", lines)
+                self.assertIn("compose ps -q rabbitmq", lines)
+                self.assertIn("verify", lines)
+                self.assertIn("resource-post", lines)
+
+    def test_restore_refuses_active_containers_before_safety_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory), running="gateway-1")
+            with self._backup_fixture() as (_, backup_argument):
+                result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+            self.assertNotEqual(result.returncode, 0)
+            lines = self._log_lines(log)
+            self.assertTrue(any(line.startswith("docker ps ") for line in lines))
+            self.assertFalse(any(line.startswith("compose ") for line in lines), lines)
+            self.assertNotIn("resource-pre", lines)
+            self.assertNotIn("docker-clear", lines)
+
+    def test_restore_rejects_unbound_checksums_and_malformed_archives_before_mutation(self) -> None:
+        for fixture_options in (
+            {"missing_checksum": True},
+            {"extra_checksum": True},
+            {"malformed": True},
+        ):
+            with self.subTest(fixture_options=fixture_options), tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+                environment, log = self._mock_runtime(Path(temporary_directory))
+                with self._backup_fixture(**fixture_options) as (_, backup_argument):
+                    result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                lines = self._log_lines(log)
+                self.assertFalse(any(line == "docker-clear" for line in lines), lines)
+                self.assertFalse(any(line.startswith("compose stop") for line in lines), lines)
+
+    def test_backup_rejects_unsafe_output_paths_without_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            backup_root = REPO_ROOT / "backups"
+            backup_root.mkdir(mode=0o700, exist_ok=True)
+            outside = Path(temporary_directory) / "outside"
+            outside.mkdir()
+            symlink = backup_root / "task5-symlink"
+            symlink.symlink_to(outside, target_is_directory=True)
+            existing = backup_root / "task5-existing"
+            shutil.rmtree(existing, ignore_errors=True)
+            existing.mkdir(mode=0o700)
+            try:
+                invalid_paths = (
+                    "backups/../task5-traversal",
+                    str(outside),
+                    "backups/task5-symlink",
+                    "backups/task5-delimiter:name",
+                    "backups/task5-delimiter\nname",
+                    "backups/task5-existing",
+                )
+                for invalid_path in invalid_paths:
+                    with self.subTest(invalid_path=invalid_path):
+                        result = self._run_script(SCRIPTS_DIR / "backup.sh", ["--output", invalid_path], environment)
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertEqual(self._log_lines(log), [], invalid_path)
+            finally:
+                symlink.unlink(missing_ok=True)
+                shutil.rmtree(existing)
+                if backup_root.exists() and not any(backup_root.iterdir()):
+                    backup_root.rmdir()
+
+    def test_restore_rejects_unsafe_input_paths_without_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            traversal_target = REPO_ROOT / "task5-restore-traversal-fixture"
+            with self._backup_fixture() as (backup_dir, backup_argument):
+                outside = Path(temporary_directory) / "outside-backup"
+                shutil.copytree(backup_dir, outside)
+                symlink = REPO_ROOT / "backups" / "task5-restore-symlink"
+                symlink.symlink_to(outside, target_is_directory=True)
+                delimiter = REPO_ROOT / "backups" / "task5-restore:delimiter"
+                shutil.copytree(backup_dir, delimiter)
+                non_directory = REPO_ROOT / "backups" / "task5-restore-file"
+                non_directory.write_text("not a directory\n", encoding="utf-8")
+                shutil.copytree(backup_dir, traversal_target)
+                invalid_paths = (
+                    "backups/../task5-restore-traversal-fixture",
+                    str(outside),
+                    "backups/task5-restore-symlink",
+                    "backups/task5-restore:delimiter",
+                    "backups/task5-restore-delimiter\nname",
+                    "backups/task5-restore-file",
+                )
+                try:
+                    for invalid_path in invalid_paths:
+                        with self.subTest(invalid_path=invalid_path):
+                            log.write_text("", encoding="utf-8")
+                            result = self._run_script(SCRIPTS_DIR / "restore.sh", [invalid_path, "--confirm"], environment)
+                            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assertEqual(self._log_lines(log), [], invalid_path)
+                finally:
+                    symlink.unlink(missing_ok=True)
+                    shutil.rmtree(delimiter, ignore_errors=True)
+                    non_directory.unlink(missing_ok=True)
+                    shutil.rmtree(traversal_target, ignore_errors=True)
+
+    def test_backup_restart_failure_is_not_masked_by_application_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            environment["MOCK_COMPOSE_FAIL_STAGE"] = "stateful-up"
+            with self._backup_fixture() as (backup_dir, backup_argument):
+                output_argument = backup_argument.with_name(backup_dir.name + "-restart")
+                result = self._run_script(SCRIPTS_DIR / "backup.sh", ["--output", str(output_argument)], environment)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = self._log_lines(log)
+            self.assertIn("compose up -d nuq-postgres redis rabbitmq", lines)
+            self.assertNotIn("compose up -d playwright-service api gateway", lines)
+
+    def test_restore_failure_cleanup_stops_services_after_mutation(self) -> None:
+        for failure_stage in ("clear", "extract", "start", "verify"):
+            with self.subTest(failure_stage=failure_stage), tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+                environment, log = self._mock_runtime(Path(temporary_directory))
+                if failure_stage in {"clear", "extract"}:
+                    environment["MOCK_DOCKER_FAIL_STAGE"] = failure_stage
+                elif failure_stage == "start":
+                    environment["MOCK_COMPOSE_FAIL_STAGE"] = failure_stage
+                else:
+                    environment["MOCK_DOCKER_FAIL_STAGE"] = failure_stage
+                with self._backup_fixture() as (_, backup_argument):
+                    result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                lines = self._log_lines(log)
+                self.assertIn("docker-clear", lines)
+                self.assertIn("compose stop gateway api playwright-service redis rabbitmq nuq-postgres", lines)
+                self.assertIn("safety backup:", result.stderr)
 
     def test_verification_scripts_do_not_print_api_key(self) -> None:
         for script in VERIFICATION_SCRIPTS:

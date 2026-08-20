@@ -16,6 +16,54 @@ source "$ROOT/.env"
 
 COMPOSE_SCRIPT="${FIRECRAWL_COMPOSE_SCRIPT:-$SCRIPT_DIR/compose.sh}"
 RESOURCE_GUARD="${FIRECRAWL_RESOURCE_GUARD_SCRIPT:-$SCRIPT_DIR/resource-guard.sh}"
+BACKUP_ROOT="$ROOT/backups"
+
+fail_usage() {
+  printf '%s\n' "$1" >&2
+  exit 2
+}
+
+ensure_backup_root() {
+  if [[ -L "$BACKUP_ROOT" || ( -e "$BACKUP_ROOT" && ! -d "$BACKUP_ROOT" ) ]]; then
+    fail_usage "backup root is not a real directory: $BACKUP_ROOT"
+  fi
+  if [[ ! -e "$BACKUP_ROOT" ]]; then
+    mkdir -m 700 -- "$BACKUP_ROOT"
+  fi
+  [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]] || fail_usage "backup root is not a real directory: $BACKUP_ROOT"
+}
+
+assert_no_symlink_components() {
+  local candidate="$1"
+  local current="$ROOT"
+  local relative="${candidate#"$ROOT"/}"
+  local component
+  local -a components
+  IFS='/' read -r -a components <<< "$relative"
+  for component in "${components[@]}"; do
+    [[ -z "$component" || "$component" == "." ]] && continue
+    current="$current/$component"
+    [[ ! -L "$current" ]] || fail_usage "backup path contains a symlink: $candidate"
+  done
+}
+
+resolve_output_path() {
+  local requested="$1"
+  local candidate canonical backup_root_canonical
+  [[ -n "$requested" ]] || fail_usage "output path must not be empty"
+  [[ "$requested" != /* ]] || fail_usage "output path must be relative beneath $BACKUP_ROOT"
+  [[ "$requested" != *:* && "$requested" != *$'\n'* && "$requested" != *$'\r'* ]] || fail_usage "output path contains a Docker volume delimiter"
+  case "/$requested/" in
+    */../*) fail_usage "output path must not contain traversal components" ;;
+  esac
+  candidate="$ROOT/$requested"
+  backup_root_canonical="$(realpath -- "$BACKUP_ROOT")"
+  canonical="$(realpath -m -- "$candidate")"
+  [[ "$canonical" == "$backup_root_canonical"/* ]] || fail_usage "output path must be beneath $BACKUP_ROOT"
+  assert_no_symlink_components "$candidate"
+  [[ ! -e "$candidate" && ! -L "$candidate" ]] || fail_usage "output directory already exists: $requested"
+  printf '%s\n' "$canonical"
+}
 
 leave_stopped=0
 output_dir=""
@@ -38,14 +86,14 @@ while (($#)); do
 done
 
 backup_timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+ensure_backup_root
 if [[ -z "$output_dir" ]]; then
-  backup_dir="$ROOT/backups/$backup_timestamp"
-elif [[ "$output_dir" = /* ]]; then
-  backup_dir="$output_dir"
+  backup_dir="$(resolve_output_path "backups/$backup_timestamp")"
 else
-  backup_dir="$ROOT/$output_dir"
+  backup_dir="$(resolve_output_path "$output_dir")"
 fi
-install -d -m 700 "$backup_dir"
+mkdir -p -- "$(dirname -- "$backup_dir")"
+mkdir -m 700 -- "$backup_dir"
 
 "$RESOURCE_GUARD" pre
 
@@ -63,9 +111,9 @@ archives=(
 services_stopped=0
 restart_services() {
   printf 'restarting Firecrawl stateful services\n' >&2
-  "$COMPOSE_SCRIPT" up -d nuq-postgres redis rabbitmq
+  "$COMPOSE_SCRIPT" up -d nuq-postgres redis rabbitmq || return 1
   printf 'restarting Firecrawl application services\n' >&2
-  "$COMPOSE_SCRIPT" up -d playwright-service api gateway
+  "$COMPOSE_SCRIPT" up -d playwright-service api gateway || return 1
 }
 backup_exit() {
   local status=$?
@@ -100,8 +148,8 @@ for index in "${!volumes[@]}"; do
 done
 
 compose_version="$("$COMPOSE_SCRIPT" version --short)"
-git_commit="$(git rev-parse HEAD)"
-git_description="$(git describe --tags --always)"
+git_commit="$(git -C "$ROOT" rev-parse HEAD)"
+git_description="$(git -C "$ROOT" describe --tags --always)"
 printf '%s\n' \
   "Git commit: $git_commit" \
   "Git describe: $git_description" \
