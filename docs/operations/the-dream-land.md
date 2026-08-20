@@ -68,6 +68,7 @@ scripts/resource-guard.sh post
 Stop only Firecrawl services, in reverse dependency order:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
 ```
@@ -75,6 +76,7 @@ scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgr
 For a controlled Firecrawl restart, use the same stop/start sequence rather than restarting the entire Compose project. The bounded wait completes before verification:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
 scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq playwright-service api gateway
@@ -203,6 +205,11 @@ The sequence uses SQLite's online backup API inside the running `open-webui` con
 
 ```bash
 set -euo pipefail
+set +x
+old_key=''
+new_key=''
+cleanup_rotation() { unset old_key new_key; }
+trap cleanup_rotation EXIT
 cd /home/kang/docker/firecrawl
 old_key="$(python3 - secrets/api.env <<'PY'
 from pathlib import Path
@@ -299,6 +306,7 @@ scripts/verify-local.sh
 scripts/resource-guard.sh post
 curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null
 unset old_key new_key
+trap - EXIT
 ```
 
 A rotation is complete only when the old key returns `401`, the new key returns `200`, the read-only SQLite check validates exactly the five settings above while reporting only `firecrawl_api_key=set`, local Firecrawl verification passes, and the browser/manual search is confirmed separately. No final gate is masked with `|| true`.
@@ -308,6 +316,7 @@ A rotation is complete only when the old key returns `401`, the new key returns 
 Create a cold backup of all three persistent Firecrawl volumes. The script stops and restarts Firecrawl services only:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 scripts/backup.sh
 latest="$(python3 -c 'from pathlib import Path; candidates=[p for p in Path("backups").iterdir() if p.is_dir() and p.name[:1].isdigit()]; print(max(candidates, key=lambda p:p.stat().st_mtime).resolve())')"
@@ -350,6 +359,7 @@ test -d "$restore_dir"
 3. The restore script refuses to run while any Firecrawl container is active, creates a safety backup, validates the manifest/checksums/archives, replaces volume contents, restarts Firecrawl, and reruns local verification:
 
 ```bash
+set -euo pipefail
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
 I_UNDERSTAND_FIRECRAWL_RESTORE=YES scripts/restore.sh "$restore_dir" --confirm
 scripts/compose.sh ps
@@ -378,6 +388,7 @@ Replace `CANDIDATE_REF` only after reviewing its Compose, migrations, image tags
 2. Back up and record the current revision:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 git rev-parse HEAD > state/firecrawl-before-upgrade.commit
 scripts/backup.sh
@@ -388,6 +399,7 @@ scripts/compose.sh config --quiet
 3. After the candidate review, pull direct runtime images sequentially. The resource guard runs between every pull; no floating image is accepted:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 for service in redis rabbitmq gateway; do
   image="$(scripts/compose.sh config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service")"
@@ -407,6 +419,7 @@ scripts/resource-guard.sh pre
 4. Rebuild source images one at a time with the pre-build resource guard between each build. The deployment Dockerfiles use the reviewed immutable Node, PostgreSQL, and Go base digests. Versioned external build downloads remain a separate provenance limitation; this wave records that limitation and does not invent checksums for those upstream artifacts:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh build nuq-postgres
 scripts/resource-guard.sh pre
@@ -419,6 +432,7 @@ scripts/resource-guard.sh pre
 5. Inspect and record the direct image IDs and repository digests before restarting. This records the reviewed, pulled images without printing credentials:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 install -d -m 700 state
 umask 077
@@ -442,6 +456,7 @@ record_upgrade_images state/upgrade-images-before.txt
 6. Stop and start Firecrawl only, preserving the existing volumes. The bounded wait must complete before the post-upgrade gates:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
 scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq playwright-service api gateway
@@ -482,6 +497,7 @@ Do not upgrade through an unreviewed floating `latest`, do not recreate unrelate
 This disables public Firecrawl access while preserving the `443` Nextcloud and `8443` Open WebUI routes. Do not use `tailscale serve reset` or an unqualified Funnel command:
 
 ```bash
+set -euo pipefail
 tailscale funnel --https=10000 off
 tailscale funnel status --json > /home/kang/docker/firecrawl/state/funnel-after-disable.json
 sha256sum /home/kang/docker/firecrawl/state/funnel-after-disable.json
@@ -500,6 +516,7 @@ tailscale serve status
 To re-enable only the Firecrawl route after local verification succeeds:
 
 ```bash
+set -euo pipefail
 tailscale funnel --bg --yes --https=10000 http://127.0.0.1:3002
 cd /home/kang/docker/firecrawl
 scripts/verify-funnel.sh state/pre-deploy-tailscale.json
@@ -507,7 +524,7 @@ scripts/verify-funnel.sh state/pre-deploy-tailscale.json
 
 ## Roll Open WebUI back to direct SearXNG
 
-The maintained Task 7 rollback backup is `/home/kang/docker/firecrawl/backups/open-webui/20260820T120549Z/`, outside the Open WebUI repository. Use that verified timestamped backup by default, or an explicitly approved timestamped directory beneath the same backup root. This procedure changes Open WebUI only; it does not stop Firecrawl or modify Tailscale.
+Direct-SearXNG rollback intentionally uses the Task 7 pre-Firecrawl backup `/home/kang/docker/firecrawl/backups/open-webui/20260820T120549Z/` because it restores SearXNG retrieval. The fresh final-fix backup `/home/kang/docker/firecrawl/backups/open-webui/20260820T150716Z/` is the rollback point for the later network-segmentation change and preserves Firecrawl retrieval; it is not a direct-SearXNG rollback source. Both are outside the Open WebUI repository. Use the Task 7 backup by default for this direct-SearXNG procedure, or an explicitly approved timestamped directory beneath the same backup root. This procedure changes Open WebUI only; it does not stop Firecrawl or modify Tailscale.
 
 1. Set the approved absolute backup path, reject symlinks/non-directories, and verify its files, hashes, and SQLite integrity before stopping or restoring anything:
 
@@ -550,9 +567,34 @@ The normal rollback manifest is checked with `(cd "$BACKUP_DIR" && sha256sum -c 
 
 ```bash
 set -euo pipefail
+set +x
 unset BACKUP_HELPER_IMAGE
-# shellcheck disable=SC1091
-source /home/kang/docker/firecrawl/.env
+cleanup_helper_image() { unset BACKUP_HELPER_IMAGE; }
+trap cleanup_helper_image EXIT
+BACKUP_HELPER_IMAGE="$(
+python3 - /home/kang/docker/firecrawl/.env <<'PY'
+from pathlib import Path
+import re
+import sys
+
+value = None
+for line_number, line in enumerate(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), 1):
+    if not line or line.startswith("#"):
+        continue
+    if "=" not in line:
+        raise SystemExit(f"malformed .env line {line_number}")
+    key, candidate = line.split("=", 1)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or candidate != candidate.strip():
+        raise SystemExit(f"malformed .env line {line_number}")
+    if key == "BACKUP_HELPER_IMAGE":
+        if value is not None or not candidate:
+            raise SystemExit("BACKUP_HELPER_IMAGE must occur exactly once with a non-empty value")
+        value = candidate
+if value is None:
+    raise SystemExit("missing BACKUP_HELPER_IMAGE")
+print(value)
+PY
+)"
 case "$BACKUP_HELPER_IMAGE" in
   *@sha256:*) ;;
   *) printf 'BACKUP_HELPER_IMAGE must be digest-pinned\n' >&2; exit 1 ;;
@@ -564,6 +606,7 @@ docker run --rm \
   -v "$BACKUP_DIR:/backup:ro" \
   "$BACKUP_HELPER_IMAGE" sh -eu -c 'cp /backup/webui.db /data/webui.db'
 unset BACKUP_HELPER_IMAGE
+trap - EXIT
 docker compose -f /home/kang/docker/open-webui/compose.yaml config --quiet
 docker compose -f /home/kang/docker/open-webui/compose.yaml up -d --wait --wait-timeout 300 --no-deps open-webui
 ```
@@ -574,7 +617,7 @@ docker compose -f /home/kang/docker/open-webui/compose.yaml up -d --wait --wait-
 set -euo pipefail
 healthy=0
 for (( attempt=1; attempt<=60; attempt++ )); do
-  if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
+  if curl --fail --silent --connect-timeout 5 --max-time 10 http://127.0.0.1:3000/health >/dev/null; then
     healthy=1
     break
   fi
@@ -586,7 +629,7 @@ if (( ! healthy )); then
   docker compose -f /home/kang/docker/open-webui/compose.yaml logs --tail=100 open-webui >&2
   exit 1
 fi
-curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null
+curl --fail --silent --show-error --connect-timeout 5 --max-time 10 http://127.0.0.1:3000/health >/dev/null
 docker compose -f /home/kang/docker/open-webui/compose.yaml logs --since=5m open-webui searxng
 tailscale serve status
 ```
@@ -598,6 +641,7 @@ The restored database is the pre-cutover database, so it restores the prior Sear
 Use this after an upgrade or configuration change fails. It restores the repository revision and images, not the data. A data replacement is a separate, explicitly confirmed restore procedure.
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 ROLLBACK_REF='KNOWN_GOOD_REF'
 test -n "$ROLLBACK_REF"

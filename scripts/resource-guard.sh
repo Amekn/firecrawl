@@ -33,14 +33,19 @@ if [[ -e "$state_file" || -L "$state_file" ]]; then
     printf 'resource guard failed: swap state is not a regular file\n' >&2
     exit 1
   }
-  read -r previous_timestamp previous_swap extra < "$state_file" || {
+  state_lines=()
+  mapfile -t state_lines < "$state_file"
+  if (( ${#state_lines[@]} != 1 )); then
     printf 'resource guard failed: malformed swap state\n' >&2
     exit 1
-  }
-  [[ -z "${extra:-}" && "${previous_timestamp:-}" =~ ^[0-9]+$ && "${previous_swap:-}" =~ ^[0-9]+$ ]] || {
+  fi
+  if [[ "${state_lines[0]}" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+    previous_timestamp="${BASH_REMATCH[1]}"
+    previous_swap="${BASH_REMATCH[2]}"
+  else
     printf 'resource guard failed: malformed swap state\n' >&2
     exit 1
-  }
+  fi
   elapsed=$((swap_timestamp - previous_timestamp))
   delta=$((swap_used_kib - previous_swap))
   if (( elapsed <= 0 )); then
