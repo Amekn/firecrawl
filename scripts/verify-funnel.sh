@@ -70,22 +70,29 @@ def load(path):
     return value
 
 
-def port_entries(status, section, port):
-    section_value = status.get(section, {})
-    if not isinstance(section_value, dict):
-        return []
-    matches = []
-    for key, value in section_value.items():
-        key_text = str(key)
-        if key_text == port or key_text == f":{port}" or key_text.endswith(f":{port}"):
-            matches.append((key_text, value))
-    return sorted(matches, key=lambda item: item[0])
+def protected_entries(status):
+    entries = {}
+    for section in ("TCP", "Web", "AllowFunnel"):
+        section_value = status.get(section)
+        if not isinstance(section_value, dict):
+            raise SystemExit(f"route preservation: malformed {section} section")
+        entries[section] = {}
+        for port in ("443", "8443"):
+            if port not in section_value:
+                raise SystemExit(f"route preservation: missing {section} {port}")
+            value = section_value[port]
+            if section == "TCP" and (not isinstance(value, str) or not value):
+                raise SystemExit(f"route preservation: malformed {section} {port}")
+            if section == "Web" and (not isinstance(value, dict) or not value):
+                raise SystemExit(f"route preservation: malformed {section} {port}")
+            if section == "AllowFunnel" and not isinstance(value, bool):
+                raise SystemExit(f"route preservation: malformed {section} {port}")
+            entries[section][port] = value
+    return entries
 
 baseline = load(sys.argv[1])
 current = load(sys.argv[2])
-for section in ("TCP", "Web", "AllowFunnel"):
-    for port in ("443", "8443"):
-        if port_entries(baseline, section, port) != port_entries(current, section, port):
-            raise SystemExit(f"route preservation failed: {section} {port}")
+if protected_entries(baseline) != protected_entries(current):
+    raise SystemExit("route preservation failed: protected entries changed")
 PY
 printf 'route preservation: PASS\n'

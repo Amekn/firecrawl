@@ -1,25 +1,38 @@
-#!/usr/bin/env python3
+#!/usr/local/lib/hermes-agent/venv/bin/python
 """Verify the official Firecrawl MCP adapter through the Funnel URL."""
 
 from __future__ import annotations
 
 import asyncio
+import io
 from pathlib import Path
 import os
 import sys
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
+HERMES_PYTHON = Path("/usr/local/lib/hermes-agent/venv/bin/python")
 API_ENV_FILE = Path(
     os.environ.get("FIRECRAWL_API_ENV_FILE", str(REPO_ROOT / "secrets" / "api.env"))
 )
 URL = os.environ.get(
     "FIRECRAWL_MCP_URL", "https://the-dream-land.taile6fad0.ts.net:10000"
 )
+
+
+class BoundedStderr(io.StringIO):
+    """Capture child diagnostics without forwarding unbounded stderr output."""
+
+    def __init__(self, limit: int = 4096) -> None:
+        super().__init__()
+        self._remaining = limit
+
+    def write(self, value: str) -> int:
+        if self._remaining > 0:
+            captured = value[: self._remaining]
+            super().write(captured)
+            self._remaining -= len(captured)
+        return len(value)
 
 
 def read_api_key(path: Path) -> str:
@@ -36,13 +49,21 @@ def read_api_key(path: Path) -> str:
     raise RuntimeError("missing FIRECRAWL_API_KEY")
 
 
+def ensure_hermes_interpreter() -> None:
+    if Path(sys.executable).resolve() != HERMES_PYTHON.resolve():
+        raise RuntimeError("verify-mcp.py must run with the Hermes Agent interpreter")
+
+
 async def verify(key: str) -> int:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
     server = StdioServerParameters(
         command="npx",
         args=["-y", "firecrawl-mcp"],
         env={**os.environ, "FIRECRAWL_API_URL": URL, "FIRECRAWL_API_KEY": key},
     )
-    async with stdio_client(server) as (read, write):
+    async with stdio_client(server, errlog=BoundedStderr()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
@@ -61,6 +82,7 @@ async def verify(key: str) -> int:
 
 def main() -> int:
     try:
+        ensure_hermes_interpreter()
         key = read_api_key(API_ENV_FILE)
         return asyncio.run(verify(key))
     except Exception:
