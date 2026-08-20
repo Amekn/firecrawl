@@ -67,3 +67,8 @@ apps/api/src/lib/scrape-interact/*.md
 vitest.out
 
 tmp/
+# the-dream-land deployment state
+/secrets/
+/backups/
+/state/
+/verification-output/
