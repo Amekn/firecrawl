@@ -4,7 +4,7 @@
 
 **DONE_WITH_CONCERNS — the final whole-branch fix wave passed the complete automated/runtime/network/backup gates. Inherited optional-variable warnings and the documented external-download provenance limitation remain concerns; no blocking acceptance failure remains.**
 
-This record retains the historical deployment attempts and concerns below. The final runtime was verified from source commit `053e71397ee378fdefa7a4098fb9b68af5d964ed` on branch `local/the-dream-land-deployment`; the final documentation head is a later documentation-only commit and is not a runtime revision. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; no secret value or raw Tailscale JSON is recorded.
+This record retains the historical deployment attempts and concerns below. The authoritative runtime source remains `053e71397ee378fdefa7a4098fb9b68af5d964ed` on branch `local/the-dream-land-deployment`; the final documentation head after this follow-up is documentation-only and is not a runtime revision. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; no secret value or raw Tailscale JSON is recorded.
 
 ## Final whole-branch fix wave
 
@@ -15,9 +15,9 @@ This record retains the historical deployment attempts and concerns below. The f
 - Runtime source commit: `053e71397ee378fdefa7a4098fb9b68af5d964ed` (backup-stream privacy correction included).
 - Final documentation head: the later docs commit containing this record, the external README update reference, and the final report; it is documentation-only and must not be used as the deployed runtime revision.
 - Fresh fixed Firecrawl backup: `/home/kang/docker/firecrawl/backups/20260820T152048Z/`.
-- Fresh Open WebUI rollback backup: `/home/kang/docker/firecrawl/backups/open-webui/20260820T150716Z/`.
+- Fresh final-fix network-segmentation rollback backup (preserves Firecrawl retrieval; not a direct-SearXNG rollback source): `/home/kang/docker/firecrawl/backups/open-webui/20260820T150716Z/`.
 - Final acceptance snapshot: `2026-08-20T15:22:20Z` (local `2026-08-21T03:22:20+12:00`). Final runtime evidence was recorded at `2026-08-20T15:23:19Z` in ignored `state/final-fix-runtime-evidence.txt`.
-- `.env`, `secrets/api.env`, `secrets/stack.env`, and ignored `state/` evidence files remain generated/local-only; their values are not recorded.
+- `.env` and `secrets/*` are ignored generated/local-only files; ignored `state/` evidence files remain local-only; their values are not recorded.
 
 ### Fresh backup evidence
 
@@ -55,7 +55,7 @@ This record retains the historical deployment attempts and concerns below. The f
 
 - Firecrawl git describe before the initial attempt: `v2.11.162-14-gbcdc66d`
 - Source commit before the initial attempt: `bcdc66de0c6ff518dff61b1ee0721a7791337c37`
-- Final deployed configuration commit: `b8ecea16a6e397ccd82f783c7b00e524524ae0c2`
+- Historical Task 6 first-successful configuration commit: `b8ecea16a6e397ccd82f783c7b00e524524ae0c2`
 - Branch: `local/the-dream-land-deployment`
 - Initial pre-state capture: `2026-08-20T22:47:55+12:00`
 - Initial stateful-service start: `2026-08-20T23:08:01+12:00`
@@ -226,6 +226,7 @@ Final runtime memory snapshot: Playwright `215 MiB / 2 GiB`, API `1.562 GiB / 3 
 - Completed at `2026-08-20T12:10:15Z` (`2026-08-21T00:10:15+1200` local).
 - External file changed: `/home/kang/docker/open-webui/compose.yaml`. Only the `open-webui` service `env_file` and `environment` entries were changed. `searxng` remains defined, running, healthy, and unchanged.
 - Added `../firecrawl/secrets/api.env` as an `open-webui` env file and configured Firecrawl search/loader settings, internal gateway URL, 120-second timeout, five results, and two concurrent requests. Secret contents are not recorded.
+- Direct-SearXNG rollback intentionally uses the Task 7 pre-Firecrawl backup `/home/kang/docker/firecrawl/backups/open-webui/20260820T120549Z/` because it restores SearXNG retrieval. The fresh final-fix backup `/home/kang/docker/firecrawl/backups/open-webui/20260820T150716Z/` is the rollback point for the later network-segmentation change and preserves Firecrawl retrieval; it is not a direct-SearXNG rollback source.
 - Before cutover, created and retained the mode-0700 historical Task 7 rollback backup at `/home/kang/docker/firecrawl/backups/open-webui/20260820T120549Z/` (not under `/home/kang/docker/open-webui/`). It contains non-empty `webui.db` and `compose.yaml`, plus `SHA256SUMS`. The SQLite copy was made with SQLite's backup API inside the running `open-webui` container, copied out, and passed `PRAGMA integrity_check`.
 - Existing retained-backup hashes: `webui.db` `fd02fca6560de7217c760d723b9041fc0e973b0e8b857882b5f0e3025f4dfb49`; `compose.yaml` `1279d5635625aeda41481efba554b76e35db8d4fd3c9e44a460b1a72a274d8db`.
 - Repository helper/test verification: focused migration test passed; full deploy suite passed, 31 tests; Python compile and `git diff --check` passed.
@@ -255,9 +256,9 @@ Final runtime memory snapshot: Playwright `215 MiB / 2 GiB`, API `1.562 GiB / 3 
 - Container/process check: all active Firecrawl, Nextcloud, Open WebUI, Open Terminal, and SearXNG containers remained running/healthy; the expected one-shot `nextcloud-aio-watchtower` remained `Exited (0)`. Hermes dashboard, Hermes gateway, and the Pyright language-server processes were present. No unrelated service was restarted.
 - No rollback was needed or run because route preservation and public authentication both passed. Ports 443 and 8443 were not modified.
 
-## Task 9 — backup, stop/start recovery, operations documentation, and final acceptance
+## Historical Task 9 — backup, stop/start recovery, operations documentation, and final acceptance
 
-**DONE_WITH_CONCERNS — all automated and manual criteria PASS; inherited optional-variable warnings and deferred minor concerns remain.** Completed at `2026-08-21T01:36:51+12:00` local on deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7`; browser acceptance was confirmed at `2026-08-21T02:14:58+12:00`.
+**Historical pre-final-fix acceptance: DONE_WITH_CONCERNS — all automated and manual criteria PASS; inherited optional-variable warnings and deferred minor concerns remain.** Completed at `2026-08-21T01:36:51+12:00` local on historical deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7`; browser acceptance was confirmed at `2026-08-21T02:14:58+12:00`. The authoritative runtime source for the later final-fix state remains `053e71397ee378fdefa7a4098fb9b68af5d964ed`; the final documentation head after this follow-up is documentation-only.
 
 ### Cold backup
 

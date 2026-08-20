@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -262,6 +263,17 @@ class DeploymentScriptTests(unittest.TestCase):
 
     def _log_lines(self, log: Path) -> list[str]:
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+    def _runbook_text(self) -> str:
+        return (REPO_ROOT / "docs/operations/the-dream-land.md").read_text(encoding="utf-8")
+
+    def _runbook_section(self, text: str, heading: str, next_heading: str) -> str:
+        start = text.index(heading)
+        end = text.index(next_heading, start)
+        return text[start:end]
+
+    def _bash_blocks(self, section: str) -> list[str]:
+        return re.findall(r"```bash\n(.*?)```", section, flags=re.DOTALL)
 
     def test_shell_scripts_are_strict_and_syntax_checked(self) -> None:
         for script in SHELL_SCRIPTS:
@@ -723,6 +735,19 @@ class DeploymentScriptTests(unittest.TestCase):
             state_file.write_text("malformed state\n", encoding="utf-8")
             malformed = run(10, 1240)
             self.assertNotEqual(malformed.returncode, 0)
+
+            trailing_state = "1240 10\ntrailing state\n"
+            state_file.write_text(trailing_state, encoding="utf-8")
+            trailing = run(10, 1300)
+            self.assertNotEqual(trailing.returncode, 0)
+            self.assertEqual(state_file.read_text(encoding="utf-8"), trailing_state)
+            for malformed_state in ("", "1240 10\n1241 11\n", "1240 10 trailing\n"):
+                with self.subTest(malformed_state=malformed_state):
+                    state_file.write_text(malformed_state, encoding="utf-8")
+                    before = state_file.read_text(encoding="utf-8")
+                    result = run(10, 1360)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(state_file.read_text(encoding="utf-8"), before)
 
     def test_local_verifier_checks_auth_search_scrape_and_logs_without_live_services(self) -> None:
         verifier = SCRIPTS_DIR / "verify-local.sh"
@@ -1215,7 +1240,7 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^from mcp(?:\.| )", msg="mcp must be imported inside the guarded path")
 
     def test_runbook_start_and_rollback_are_fail_closed_and_bounded(self) -> None:
-        text = (REPO_ROOT / "docs/operations/the-dream-land.md").read_text(encoding="utf-8")
+        text = self._runbook_text()
         self.assertIn("set -euo pipefail\ncd /home/kang/docker/firecrawl\nscripts/compose.sh up --help", text)
         self.assertNotIn("alpine:3.20", text)
         self.assertIn("BACKUP_HELPER_IMAGE", text)
@@ -1227,6 +1252,183 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertIn("web.loader.firecrawl_api_key", text)
         self.assertIn("firecrawl_api_key=set", text)
         self.assertNotIn("until curl --fail --silent http://127.0.0.1:3000/health", text)
+
+    def test_runbook_mutating_lifecycle_blocks_start_strict(self) -> None:
+        text = self._runbook_text()
+
+        start_stop = self._runbook_section(text, "## Start, stop, and restart", "## Local, Funnel, and protected-service verification")
+        start_stop_blocks = self._bash_blocks(start_stop)
+        self.assertGreaterEqual(len(start_stop_blocks), 3)
+        for block in start_stop_blocks[1:3]:
+            self.assertTrue(block.startswith("set -euo pipefail\n"), block)
+
+        restore = self._runbook_section(text, "## Restore procedure (explicit confirmation required)", "## Firecrawl upgrade: review, sequential rebuild, and verification")
+        restore_blocks = self._bash_blocks(restore)
+        self.assertGreaterEqual(len(restore_blocks), 2)
+        self.assertTrue(restore_blocks[1].startswith("set -euo pipefail\n"), restore_blocks[1])
+
+        cold_backup = self._runbook_section(text, "## Cold backup and non-destructive inspection", "## Restore procedure (explicit confirmation required)")
+        cold_backup_blocks = self._bash_blocks(cold_backup)
+        self.assertGreaterEqual(len(cold_backup_blocks), 2)
+        self.assertTrue(cold_backup_blocks[0].startswith("set -euo pipefail\n"), cold_backup_blocks[0])
+
+        upgrade = self._runbook_section(text, "## Firecrawl upgrade: review, sequential rebuild, and verification", "## Disable only Firecrawl Funnel port 10000")
+        upgrade_blocks = self._bash_blocks(upgrade)
+        self.assertGreaterEqual(len(upgrade_blocks), 6)
+        for block in upgrade_blocks[1:6]:
+            self.assertTrue(block.startswith("set -euo pipefail\n"), block)
+
+        funnel = self._runbook_section(text, "## Disable only Firecrawl Funnel port 10000", "## Roll Open WebUI back to direct SearXNG")
+        funnel_blocks = self._bash_blocks(funnel)
+        self.assertGreaterEqual(len(funnel_blocks), 3)
+        for block in (funnel_blocks[0], funnel_blocks[2]):
+            self.assertTrue(block.startswith("set -euo pipefail\n"), block)
+
+        rollback = self._runbook_section(text, "## Full Firecrawl rollback without deleting volumes", "## Complete acceptance suite")
+        rollback_blocks = self._bash_blocks(rollback)
+        self.assertEqual(len(rollback_blocks), 1)
+        self.assertTrue(rollback_blocks[0].startswith("set -euo pipefail\n"), rollback_blocks[0])
+
+    def test_runbook_open_webui_rollback_health_calls_are_per_call_bounded(self) -> None:
+        text = self._runbook_text()
+        rollback = self._runbook_section(text, "## Roll Open WebUI back to direct SearXNG", "## Full Firecrawl rollback without deleting volumes")
+        blocks = self._bash_blocks(rollback)
+        self.assertEqual(len(blocks), 3)
+        health_block = blocks[2]
+        self.assertIn("for (( attempt=1; attempt<=60; attempt++ )); do", health_block)
+        health_calls = [
+            line.strip()
+            for line in health_block.splitlines()
+            if line.strip().startswith("if curl ") or line.strip().startswith("curl --fail ")
+        ]
+        self.assertEqual(len(health_calls), 2, health_calls)
+        for call in health_calls:
+            self.assertIn("--connect-timeout 5", call)
+            self.assertIn("--max-time 10", call)
+        self.assertIn("FAIL: Open WebUI did not become healthy", health_block)
+
+    def test_runbook_key_rotation_check_uses_supplied_key_and_cleans_up(self) -> None:
+        text = self._runbook_text()
+        rotation = self._runbook_section(
+            text,
+            "2. Stop the two consumers, rotate the key, update persisted settings, and verify both authentication generations.",
+            "A rotation is complete only when",
+        )
+        function_match = re.search(r"(?ms)^check_key\(\) \{\n(?P<body>.*?)^\}", rotation)
+        if function_match is None:
+            self.fail("documented check_key function is missing")
+        function = function_match.group(0)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            config_path = root / "curl-config"
+            (fake_bin / "curl").write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['CURL_CONFIG']).write_text(sys.stdin.read(), encoding='utf-8')\n"
+                "print('200', end='')\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").chmod(0o700)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}:{environment['PATH']}",
+                    "CURL_CONFIG": str(config_path),
+                    "CHECK_KEY_SENTINEL": "rotation-sentinel-key",
+                }
+            )
+            result = subprocess.run(
+                ["bash", "-c", function + '\ncheck_key "$CHECK_KEY_SENTINEL"\n'],
+                cwd=REPO_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "200")
+            self.assertEqual(result.stderr, "")
+            config = config_path.read_text(encoding="utf-8")
+            self.assertIn('header = "Authorization: Bearer rotation-sentinel-key"', config)
+            self.assertNotIn("***", config)
+            self.assertNotIn("rotation-sentinel-key", result.stdout + result.stderr)
+
+        self.assertRegex(rotation, r"(?m)^set \+x$")
+        self.assertRegex(rotation, r"(?m)^old_key=''$")
+        self.assertRegex(rotation, r"(?m)^new_key=''$")
+        self.assertIn("trap cleanup_rotation EXIT", rotation)
+        self.assertIn("unset old_key new_key", rotation)
+        self.assertIn("trap - EXIT", rotation)
+
+    def test_runbook_rollback_helper_uses_non_executing_exact_key_parser(self) -> None:
+        text = self._runbook_text()
+        rollback = self._runbook_section(text, "## Roll Open WebUI back to direct SearXNG", "## Full Firecrawl rollback without deleting volumes")
+        restore_block = self._bash_blocks(rollback)[1]
+        self.assertNotRegex(restore_block, r"(?m)^\s*(?:source|\.)\s+.*\.env\s*$")
+        self.assertIn("set +x", restore_block)
+        self.assertIn("BACKUP_HELPER_IMAGE", restore_block)
+        self.assertIn("@sha256:", restore_block)
+        self.assertIn('"$BACKUP_HELPER_IMAGE" sh -eu -c', restore_block)
+
+        parser_match = re.search(
+            r"BACKUP_HELPER_IMAGE=\"\$\(\npython3 - /home/kang/docker/firecrawl/\.env <<'PY'\n(?P<body>.*?)\nPY\n\)\"",
+            restore_block,
+            flags=re.DOTALL,
+        )
+        if parser_match is None:
+            self.fail("documented BACKUP_HELPER_IMAGE parser is missing")
+        parser = parser_match.group("body")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+
+            def run_parser(contents: str) -> subprocess.CompletedProcess[str]:
+                env_file = root / "env"
+                env_file.write_text(contents, encoding="utf-8")
+                return subprocess.run(
+                    [sys.executable, "-", str(env_file)],
+                    input=parser,
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            valid = run_parser("OTHER=value\nBACKUP_HELPER_IMAGE=repo/helper@sha256:abc\n")
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(valid.stdout, "repo/helper@sha256:abc\n")
+            for invalid in (
+                "BACKUP_HELPER_IMAGE=repo/helper@sha256:abc\nBACKUP_HELPER_IMAGE=repo/other@sha256:def\n",
+                "BACKUP_HELPER_IMAGE=\n",
+                "OTHER=value\n",
+                "BACKUP_HELPER_IMAGE repo/helper@sha256:abc\n",
+            ):
+                with self.subTest(invalid=invalid):
+                    result = run_parser(invalid)
+                    self.assertNotEqual(result.returncode, 0)
+
+    def test_runbook_and_record_make_rollback_provenance_and_history_unambiguous(self) -> None:
+        runbook = self._runbook_text()
+        record = (REPO_ROOT / "docs/operations/deployment-record.md").read_text(encoding="utf-8")
+        provenance = (
+            "Direct-SearXNG rollback intentionally uses the Task 7 pre-Firecrawl backup "
+            "`/home/kang/docker/firecrawl/backups/open-webui/20260820T120549Z/` because it restores SearXNG retrieval.",
+        )
+        for document in (runbook, record):
+            self.assertIn(provenance[0], document)
+            self.assertIn("/home/kang/docker/firecrawl/backups/open-webui/20260820T150716Z/", document)
+            self.assertIn("not a direct-SearXNG rollback source", document)
+
+        self.assertIn("Historical Task 6 first-successful configuration commit: `b8ecea16a6e397ccd82f783c7b00e524524ae0c2`", record)
+        self.assertNotIn("Final deployed configuration commit", record)
+        self.assertIn("## Historical Task 9 — backup, stop/start recovery, operations documentation, and final acceptance", record)
+        self.assertIn("Historical pre-final-fix acceptance", record)
+        self.assertIn("historical deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7`", record)
+        self.assertIn("authoritative runtime source remains `053e71397ee378fdefa7a4098fb9b68af5d964ed`", record)
+        self.assertIn("final documentation head after this follow-up is documentation-only", record)
 
 
 if __name__ == "__main__":
