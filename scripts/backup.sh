@@ -155,6 +155,7 @@ for index in "${!volumes[@]}"; do
     printf 'backup archive is empty or missing: %s\n' "$backup_dir/$archive" >&2
     exit 1
   }
+  chmod 600 -- "$backup_dir/$archive"
 done
 
 compose_version="$("$COMPOSE_SCRIPT" version --short)"
