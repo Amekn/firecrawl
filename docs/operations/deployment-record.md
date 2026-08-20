@@ -2,9 +2,9 @@
 
 ## Result
 
-**DONE_WITH_CONCERNS — the final controlled deployment passed all runtime and acceptance gates.**
+**NEEDS_CONTEXT — all automated Task 9 backup, recovery, runtime, route, resource, service, and repository gates PASS; the Open WebUI browser search remains MANUAL-PENDING (not PASS) until the user confirms results and Firecrawl search/page-scrape logs.**
 
-This record's authoritative outcome is the final gateway tmpfs-permissions retry at deployed configuration commit `b8ecea16a6e397ccd82f783c7b00e524524ae0c2`. The API and gateway were both healthy at `2026-08-20T23:38:46+12:00`; local verification and the post resource guard passed. Compose still reports the explicitly inventoried unset variables below, so the result remains `DONE_WITH_CONCERNS` rather than an unqualified production-readiness claim. Earlier `BLOCKED` and `NOT RUN` results are retained below as historical attempts and do not describe the final state. Open WebUI and Tailscale were not modified or started by this deployment.
+This record retains the historical deployment attempts and concerns below. The Task 9 automated acceptance was completed against deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7` on branch `local/the-dream-land-deployment`. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; no secret value or raw Tailscale JSON is recorded.
 
 ## Source and timing
 
@@ -209,3 +209,68 @@ Final runtime memory snapshot: Playwright `215 MiB / 2 GiB`, API `1.562 GiB / 3 
 - Existing service checks: **PASS** — `curl --fail --silent --show-error https://the-dream-land.taile6fad0.ts.net:8443/health` and `curl --fail --silent --show-error https://the-dream-land.taile6fad0.ts.net/status.php` both returned zero. The former verified public Funnel-enabled Open WebUI; the latter verified tailnet-only Nextcloud 443 from the host.
 - Container/process check: all active Firecrawl, Nextcloud, Open WebUI, Open Terminal, and SearXNG containers remained running/healthy; the expected one-shot `nextcloud-aio-watchtower` remained `Exited (0)`. Hermes dashboard, Hermes gateway, and the Pyright language-server processes were present. No unrelated service was restarted.
 - No rollback was needed or run because route preservation and public authentication both passed. Ports 443 and 8443 were not modified.
+
+## Task 9 — backup, stop/start recovery, operations documentation, and final acceptance
+
+**NEEDS_CONTEXT — automated PASS; Open WebUI browser search MANUAL-PENDING (not PASS).** Completed at `2026-08-21T01:36:51+12:00` local on deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7`.
+
+### Cold backup
+
+- Exact command executed: `scripts/backup.sh`.
+- Backup path: `/home/kang/docker/firecrawl/backups/20260820T132923Z/`.
+- The backup script stopped and restarted only Firecrawl services; it did not run restore.
+- `manifest.txt`, `SHA256SUMS`, and all three expected non-empty archives are present. Archive sizes and SHA-256 hashes:
+
+| Archive | Size | SHA-256 | Tar listing entries |
+|---|---:|---|---:|
+| `postgres.tar.gz` | 5,756,445 bytes | `b49fc83c106444c81a68bf2761bb378b121c634fc41213d8439b89a29a71df02` | 1,049 |
+| `redis.tar.gz` | 405 bytes | `d74236ef0b343f9bb0f8f4a0a5d980a8926e5c59a18ed4a5f2a23c32c1e73710` | 2 |
+| `rabbitmq.tar.gz` | 167,604 bytes | `c9a3f28729cade41461850a9cde659f876bce6dcec0d5fd1dc745c37570e6366` | 73 |
+
+- `tar -tzf` inspection passed for every archive; no production restore was run.
+- The literal brief command `sha256sum -c "$latest/SHA256SUMS"` was executed from the repository root and returned nonzero because `SHA256SUMS` contains archive basenames while the shell working directory was not the backup directory. The corrected, equivalent verification `cd "$latest" && sha256sum -c SHA256SUMS` returned `postgres.tar.gz: OK`, `rabbitmq.tar.gz: OK`, and `redis.tar.gz: OK`. This is a relative-path defect in the brief command, not a backup integrity failure.
+
+### Firecrawl-only stop/start recovery and persistence
+
+The required non-secret indicators were captured before and after the exact recovery commands. PostgreSQL reported `accepting connections`, database `postgres`, and `0` public tables; Redis reported `PONG` and `dbsize 7`; RabbitMQ ping succeeded and the four expected queues all reported `0` ready and `0` unacknowledged messages. The named volume mountpoints remained:
+
+- `firecrawl-postgres-data` → `/var/lib/docker/volumes/firecrawl-postgres-data/_data`
+- `firecrawl-redis-data` → `/var/lib/docker/volumes/firecrawl-redis-data/_data`
+- `firecrawl-rabbitmq-data` → `/var/lib/docker/volumes/firecrawl-rabbitmq-data/_data`
+
+The exact authorized recovery commands were executed:
+
+```bash
+scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
+scripts/compose.sh up -d nuq-postgres redis rabbitmq playwright-service api gateway
+scripts/verify-local.sh
+scripts/resource-guard.sh post
+```
+
+The immediate verification observed `healthz: ERROR` while the newly-started gateway was still in `starting`; no unrelated service was changed. After polling the five Firecrawl health states, the required verification was rerun and passed: healthz `200`, no-key/wrong-key readiness `401`, keyed readiness `200`, search `200` with non-empty results, scrape `200` with Markdown, SearXNG log marker, and post resource guard. Final Firecrawl service states were API/gateway/NuQ PostgreSQL/Redis/RabbitMQ `running healthy`, Playwright `running`, all exit codes `0`.
+
+### Documentation and external README
+
+- Created `docs/operations/the-dream-land.md` with exact status/log, start/stop/restart, local/Funnel/MCP verification, safe key retrieval over local TTY or trusted SSH, key rotation and persisted Open WebUI update, cold backup and confirmation-gated restore, reviewed-tag upgrade/rebuild, Funnel `10000` disable/re-enable, direct-SearXNG Open WebUI rollback, and full Firecrawl rollback without volume deletion guidance.
+- Updated external `/home/kang/docker/open-webui/README.md` separately (not part of the Firecrawl commit): routing table now maps `10000` to the loopback Firecrawl gateway at `127.0.0.1:3002`; it identifies SearXNG as Firecrawl's internal provider and documents `../firecrawl/secrets/api.env` as the secret location without embedding a value. Existing warnings about deliberate Funnel exposure, loopback-only backends, and root-path applications were preserved.
+
+### Complete automated acceptance
+
+All requested automated gates passed after the documentation changes:
+
+| Criterion | Result |
+|---|---|
+| `python -m unittest discover -s deploy/tests -v` | **PASS** — 34 tests |
+| `scripts/compose.sh config --quiet` | **PASS**; existing optional-variable warnings only |
+| `scripts/verify-local.sh` | **PASS** — health/readiness/auth/search/scrape/SearXNG |
+| `scripts/verify-funnel.sh state/pre-deploy-tailscale.json` | **PASS** — public `401`/`200`, protected route preservation |
+| `/usr/local/lib/hermes-agent/venv/bin/python scripts/verify-mcp.py` | **PASS** — `tools: 27`, `PASS` |
+| `scripts/resource-guard.sh post` | **PASS** — 8.5 GiB available RAM; 2.1/8.0 GiB swap used |
+| `git diff --check` | **PASS** |
+| Compose/container status | **PASS** — Firecrawl, Open WebUI, Nextcloud, Open Terminal, and SearXNG healthy/running; expected one-shot watchtower state unchanged |
+| FoundationDB absence | **PASS** — no active FoundationDB container |
+| Resource threshold | **PASS** — `free -h` reported 15 GiB total and 8.5 GiB available |
+| Tailscale status capture | **PASS** — live status saved privately; post-route status hash remains `a9d86c3303e38addf567acff6630570778f0a4dba0bf3c48ca71a7883813d4d9`; baseline protected-route hash is `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070` |
+| Browser Open WebUI search | **MANUAL-PENDING — NOT PASS**; user must confirm results and Firecrawl search plus page-scrape log activity |
+
+No secrets, raw Tailscale JSON, or response bodies were added to this record. No restore was run, no Tailscale route was altered during Task 9, no unrelated service was restarted, no global Git configuration was changed, and no push was performed.
