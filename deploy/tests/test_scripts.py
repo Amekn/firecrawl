@@ -676,6 +676,16 @@ class DeploymentScriptTests(unittest.TestCase):
             },
             "AllowFunnel": {f"{hostname}:8443": True},
         }
+        def post_fixture(baseline_document: dict = baseline) -> dict:
+            post = deepcopy(baseline_document)
+            post["TCP"]["10000"] = {"HTTPS": True}
+            post["Web"][f"{hostname}:10000"] = {
+                "Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}},
+            }
+            post["AllowFunnel"][f"{hostname}:10000"] = True
+            return post
+
+        post = post_fixture()
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             baseline_path = root / "baseline.json"
@@ -744,22 +754,106 @@ class DeploymentScriptTests(unittest.TestCase):
                 self.assertNotIn(secret, result.stdout + result.stderr)
                 return result
 
-            accepted = run_verifier(baseline)
+            def assert_rejected(current: dict, baseline_document: dict = baseline) -> None:
+                self.assertNotEqual(run_verifier(current, baseline_document).returncode, 0)
+
+            accepted = run_verifier(post)
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
             self.assertIn("401", accepted.stdout)
             self.assertIn("200", accepted.stdout)
 
-            unrelated = deepcopy(baseline)
-            unrelated["TCP"]["10000"] = {"HTTPS": False}
-            unrelated["Web"][f"{hostname}:10000"] = {"Handlers": {"/debug": {"Text": "ignored"}}}
-            unrelated["AllowFunnel"][f"{hostname}:10000"] = False
-            self.assertEqual(run_verifier(unrelated).returncode, 0)
+            baseline_with_unrelated = deepcopy(baseline)
+            baseline_with_unrelated["TCP"]["1234"] = {"HTTPS": True}
+            baseline_with_unrelated["Web"]["other-host.ts.net:1234"] = {
+                "Handlers": {"/": {"Proxy": "http://other"}},
+            }
+            baseline_with_unrelated["AllowFunnel"]["other-host.ts.net:1234"] = True
+            self.assertEqual(run_verifier(post_fixture(baseline_with_unrelated), baseline_with_unrelated).returncode, 0)
 
-            changed_handler = deepcopy(baseline)
+            absent_10000 = deepcopy(post)
+            del absent_10000["TCP"]["10000"]
+            assert_rejected(absent_10000)
+            absent_10000 = deepcopy(post)
+            del absent_10000["Web"][f"{hostname}:10000"]
+            assert_rejected(absent_10000)
+            absent_10000 = deepcopy(post)
+            del absent_10000["AllowFunnel"][f"{hostname}:10000"]
+            assert_rejected(absent_10000)
+
+            false_https = deepcopy(post)
+            false_https["TCP"]["10000"]["HTTPS"] = False
+            assert_rejected(false_https)
+
+            wrong_proxy = deepcopy(post)
+            wrong_proxy["Web"][f"{hostname}:10000"]["Handlers"]["/"]["Proxy"] = "http://127.0.0.1:3003"
+            assert_rejected(wrong_proxy)
+            missing_proxy = deepcopy(post)
+            del missing_proxy["Web"][f"{hostname}:10000"]["Handlers"]["/"]["Proxy"]
+            assert_rejected(missing_proxy)
+            wrong_handler_path = deepcopy(post)
+            wrong_handler_path["Web"][f"{hostname}:10000"]["Handlers"] = {
+                "/health": {"Proxy": "http://127.0.0.1:3002"},
+            }
+            assert_rejected(wrong_handler_path)
+            extra_handler_shape = deepcopy(post)
+            extra_handler_shape["Web"][f"{hostname}:10000"]["Handlers"]["/health"] = {"Text": "unexpected"}
+            assert_rejected(extra_handler_shape)
+
+            false_funnel = deepcopy(post)
+            false_funnel["AllowFunnel"][f"{hostname}:10000"] = False
+            assert_rejected(false_funnel)
+            missing_funnel = deepcopy(post)
+            del missing_funnel["AllowFunnel"][f"{hostname}:10000"]
+            assert_rejected(missing_funnel)
+
+            for section, expected_value in (
+                ("Web", {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}}}),
+                ("AllowFunnel", True),
+            ):
+                bare_key = deepcopy(post)
+                del bare_key[section][f"{hostname}:10000"]
+                bare_key[section]["10000"] = expected_value
+                assert_rejected(bare_key)
+
+                wrong_host = deepcopy(post)
+                del wrong_host[section][f"{hostname}:10000"]
+                wrong_host[section]["other-host.ts.net:10000"] = expected_value
+                assert_rejected(wrong_host)
+
+            duplicate_10000_web = deepcopy(post)
+            duplicate_10000_web["Web"]["other-host.ts.net:10000"] = {
+                "Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}},
+            }
+            assert_rejected(duplicate_10000_web)
+            duplicate_10000_funnel = deepcopy(post)
+            duplicate_10000_funnel["AllowFunnel"]["other-host.ts.net:10000"] = True
+            assert_rejected(duplicate_10000_funnel)
+
+            for section, key, value in (
+                ("TCP", "10001", {"HTTPS": True}),
+                ("Web", f"{hostname}:10001", {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}}}),
+                ("AllowFunnel", f"{hostname}:10001", True),
+            ):
+                additional_route = deepcopy(post)
+                additional_route[section][key] = value
+                assert_rejected(additional_route)
+
+            for section, key, value in (
+                ("TCP", "10000", {"HTTPS": True}),
+                ("Web", "10000", {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}}}),
+                ("Web", f"{hostname}:10000", {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}}}),
+                ("AllowFunnel", "10000", True),
+                ("AllowFunnel", f"{hostname}:10000", True),
+            ):
+                baseline_with_10000 = deepcopy(baseline)
+                baseline_with_10000[section][key] = value
+                assert_rejected(post, baseline_with_10000)
+
+            changed_handler = deepcopy(post)
             changed_handler["Web"][f"{hostname}:443"]["Handlers"]["/"]["Proxy"] = "http://changed"
             self.assertNotEqual(run_verifier(changed_handler).returncode, 0)
 
-            changed_protocol = deepcopy(baseline)
+            changed_protocol = deepcopy(post)
             changed_protocol["TCP"]["8443"]["HTTPS"] = False
             self.assertNotEqual(run_verifier(changed_protocol).returncode, 0)
 
@@ -771,32 +865,32 @@ class DeploymentScriptTests(unittest.TestCase):
                 ("AllowFunnel", f"{hostname}:8443"),
             )
             for section, key in required_keys:
-                missing = deepcopy(baseline)
+                missing = deepcopy(post)
                 del missing[section][key]
                 self.assertNotEqual(run_verifier(missing).returncode, 0, f"missing {section} {key}")
 
             for malformed in (
-                {**deepcopy(baseline), "TCP": {"443": {}, "8443": {"HTTPS": True}}},
-                {**deepcopy(baseline), "TCP": {"443": [], "8443": {"HTTPS": True}}},
-                {**deepcopy(baseline), "Web": []},
-                {**deepcopy(baseline), "Web": {f"{hostname}:443": {}, f"{hostname}:8443": {"Handlers": {}}}},
-                {**deepcopy(baseline), "AllowFunnel": []},
-                {**deepcopy(baseline), "AllowFunnel": {f"{hostname}:8443": False}},
+                {**deepcopy(post), "TCP": {"443": {}, "8443": {"HTTPS": True}}},
+                {**deepcopy(post), "TCP": {"443": [], "8443": {"HTTPS": True}}},
+                {**deepcopy(post), "Web": []},
+                {**deepcopy(post), "Web": {f"{hostname}:443": {}, f"{hostname}:8443": {"Handlers": {}}}},
+                {**deepcopy(post), "AllowFunnel": []},
+                {**deepcopy(post), "AllowFunnel": {f"{hostname}:8443": False}},
             ):
                 self.assertNotEqual(run_verifier(malformed).returncode, 0)
 
-            duplicate_web = deepcopy(baseline)
+            duplicate_web = deepcopy(post)
             duplicate_web["Web"][f"other-host.ts.net:443"] = {"Handlers": {"/": {"Proxy": "http://other"}}}
             self.assertNotEqual(run_verifier(duplicate_web).returncode, 0)
 
-            mismatched_web_host = deepcopy(baseline)
+            mismatched_web_host = deepcopy(post)
             mismatched_web_host["Web"][f"{hostname}:8443"] = mismatched_web_host["Web"].pop(
                 f"{hostname}:443"
             )
             mismatched_web_host["Web"]["other-host.ts.net:443"] = {"Handlers": {"/": {"Proxy": "http://other"}}}
             self.assertNotEqual(run_verifier(mismatched_web_host).returncode, 0)
 
-            changed_between_documents = deepcopy(baseline)
+            changed_between_documents = deepcopy(post)
             changed_between_documents["Web"] = {
                 f"other-host.ts.net:443": changed_between_documents["Web"].pop(f"{hostname}:443"),
                 f"other-host.ts.net:8443": changed_between_documents["Web"].pop(f"{hostname}:8443"),
@@ -804,15 +898,15 @@ class DeploymentScriptTests(unittest.TestCase):
             changed_between_documents["AllowFunnel"] = {"other-host.ts.net:8443": True}
             self.assertNotEqual(run_verifier(changed_between_documents).returncode, 0)
 
-            extra_funnel_443 = deepcopy(baseline)
+            extra_funnel_443 = deepcopy(post)
             extra_funnel_443["AllowFunnel"][f"{hostname}:443"] = False
             self.assertNotEqual(run_verifier(extra_funnel_443).returncode, 0)
 
-            duplicate_funnel_8443 = deepcopy(baseline)
+            duplicate_funnel_8443 = deepcopy(post)
             duplicate_funnel_8443["AllowFunnel"]["other-host.ts.net:8443"] = True
             self.assertNotEqual(run_verifier(duplicate_funnel_8443).returncode, 0)
 
-            wrong_funnel_hostname = deepcopy(baseline)
+            wrong_funnel_hostname = deepcopy(post)
             wrong_funnel_hostname["AllowFunnel"] = {"other-host.ts.net:8443": True}
             self.assertNotEqual(run_verifier(wrong_funnel_hostname).returncode, 0)
 
