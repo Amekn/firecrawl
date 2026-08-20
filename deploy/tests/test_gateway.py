@@ -27,6 +27,7 @@ class GatewayTemplateTests(unittest.TestCase):
         self.assertIn("proxy_pass http://api:3002;", text)
         self.assertIn("limit_req_zone", text)
         self.assertIn("rate=60r/m", text)
+        self.assertIn("limit_req_status 429;", text)
         self.assertIn("location = /healthz", text)
         self.assertIn("proxy_read_timeout 360s", text)
 

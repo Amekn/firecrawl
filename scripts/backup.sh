@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -16,12 +17,16 @@ source "$ROOT/.env"
 
 COMPOSE_SCRIPT="${FIRECRAWL_COMPOSE_SCRIPT:-$SCRIPT_DIR/compose.sh}"
 RESOURCE_GUARD="${FIRECRAWL_RESOURCE_GUARD_SCRIPT:-$SCRIPT_DIR/resource-guard.sh}"
+VERIFY_LOCAL="${FIRECRAWL_VERIFY_LOCAL_SCRIPT:-$SCRIPT_DIR/verify-local.sh}"
+WAIT_TIMEOUT="${FIRECRAWL_WAIT_TIMEOUT_SECONDS:-300}"
 BACKUP_ROOT="$ROOT/backups"
 
 fail_usage() {
   printf '%s\n' "$1" >&2
   exit 2
 }
+
+[[ "$WAIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || fail_usage "wait timeout must be a positive integer"
 
 ensure_backup_root() {
   if [[ -L "$BACKUP_ROOT" || ( -e "$BACKUP_ROOT" && ! -d "$BACKUP_ROOT" ) ]]; then
@@ -111,9 +116,11 @@ archives=(
 services_stopped=0
 restart_services() {
   printf 'restarting Firecrawl stateful services\n' >&2
-  "$COMPOSE_SCRIPT" up -d nuq-postgres redis rabbitmq || return 1
+  "$COMPOSE_SCRIPT" up -d --wait --wait-timeout "$WAIT_TIMEOUT" nuq-postgres redis rabbitmq || return 1
   printf 'restarting Firecrawl application services\n' >&2
-  "$COMPOSE_SCRIPT" up -d playwright-service api gateway || return 1
+  "$COMPOSE_SCRIPT" up -d --wait --wait-timeout "$WAIT_TIMEOUT" playwright-service api gateway || return 1
+  "$VERIFY_LOCAL" || return 1
+  "$RESOURCE_GUARD" post || return 1
 }
 backup_exit() {
   local status=$?
@@ -123,6 +130,9 @@ backup_exit() {
       printf 'failed to restart Firecrawl services after backup\n' >&2
       (( status == 0 )) && status=1
     fi
+  fi
+  if (( status == 0 )); then
+    printf 'backup created: %s\n' "$backup_dir"
   fi
   exit "$status"
 }
@@ -163,5 +173,7 @@ printf '%s\n' \
 (
   cd -- "$backup_dir"
   sha256sum -- *.tar.gz > SHA256SUMS
+  while read -r checksum archive; do
+    printf 'Archive SHA-256: %s  %s\n' "$checksum" "$archive"
+  done < SHA256SUMS >> manifest.txt
 )
-printf 'backup created: %s\n' "$backup_dir"

@@ -91,8 +91,45 @@ class ComposeInvariantTests(unittest.TestCase):
 
     def test_api_networks_and_required_external_network(self) -> None:
         services = self.model["services"]
-        self.assertEqual(set(services["api"]["networks"]), {"backend", "open-webui"})
+        self.assertEqual(set(services["api"]["networks"]), {"backend", "search"})
+        self.assertNotIn("open-webui", services["api"]["networks"])
+        self.assertEqual(
+            services["gateway"]["networks"],
+            {"backend": {}, "open-webui": {"aliases": ["firecrawl-gateway"]}},
+        )
         self.assertTrue(self.model["networks"]["open-webui"]["external"])
+
+    def test_search_network_is_internal_and_named_for_api_provider_peer(self) -> None:
+        search = self.model["networks"]["search"]
+        self.assertEqual(search["name"], "firecrawl-search-network")
+        self.assertTrue(search["internal"])
+
+    def test_all_service_resource_restart_health_and_logging_policies_are_pinned(self) -> None:
+        services = self.model["services"]
+        expected = {
+            "playwright-service": (1.0, 2 * 1024**3, 2 * 1024**3),
+            "api": (1.5, 3 * 1024**3, 3 * 1024**3),
+            "redis": (0.25, 256 * 1024**2, 256 * 1024**2),
+            "rabbitmq": (0.5, 512 * 1024**2, 512 * 1024**2),
+            "nuq-postgres": (0.5, 768 * 1024**2, 768 * 1024**2),
+            "gateway": (0.1, 128 * 1024**2, 128 * 1024**2),
+        }
+        for service_name, (cpus, memory, memswap) in expected.items():
+            with self.subTest(service=service_name):
+                service = services[service_name]
+                self.assertEqual(service["cpus"], cpus)
+                self.assertEqual(int(service["mem_limit"]), memory)
+                self.assertEqual(int(service["memswap_limit"]), memswap)
+                self.assertEqual(service["restart"], "unless-stopped")
+                self.assertEqual(service["logging"]["driver"], "json-file")
+                self.assertIn("max-size", service["logging"]["options"])
+                self.assertIn("max-file", service["logging"]["options"])
+        for service_name in ("api", "redis", "nuq-postgres", "gateway"):
+            self.assertIn("healthcheck", services[service_name], service_name)
+
+    def test_profiled_foundationdb_services_have_no_host_ports(self) -> None:
+        for service_name in ("foundationdb", "foundationdb-init"):
+            self.assertEqual(self.profiled_model["services"][service_name].get("ports", []), [])
 
     def test_foundationdb_services_are_profiled(self) -> None:
         services = self.profiled_model["services"]

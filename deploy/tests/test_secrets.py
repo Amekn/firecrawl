@@ -84,6 +84,20 @@ class SecretGenerationTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(api.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(stack.stat().st_mode), 0o600)
 
+    def test_existing_dotenv_permissions_are_restricted_without_regeneration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            dotenv = root / ".env"
+            dotenv_contents = "BACKUP_HELPER_IMAGE=fixture/helper@sha256:" + "a" * 64 + "\\n"
+            dotenv.write_text(dotenv_contents)
+            dotenv.chmod(0o644)
+
+            result = self.run_generator(root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(dotenv.read_text(), dotenv_contents)
+            self.assertEqual(stat.S_IMODE(dotenv.stat().st_mode), 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
