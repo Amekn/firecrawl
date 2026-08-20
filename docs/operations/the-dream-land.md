@@ -51,13 +51,13 @@ The PostgreSQL role and database are supplied by the container environment. If a
 
 ## Start, stop, and restart
 
-Start stateful services first, then the application services. Wait for the health states before calling the verification scripts:
+Start stateful services first, then the application services. Confirm the installed Compose contract once before relying on the bounded wait flags; this is read-only and must report both options:
 
 ```bash
 cd /home/kang/docker/firecrawl
-scripts/compose.sh up -d nuq-postgres redis rabbitmq
-scripts/compose.sh up -d playwright-service api gateway
-scripts/compose.sh ps
+scripts/compose.sh up --help | python3 -c 'import sys; t=sys.stdin.read(); missing=[x for x in ("--wait", "--wait-timeout") if x not in t]; print("Compose wait flags: PASS" if not missing else "missing=" + ",".join(missing)); raise SystemExit(bool(missing))'
+scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq
+scripts/compose.sh up -d --wait --wait-timeout 300 playwright-service api gateway
 scripts/verify-local.sh
 scripts/resource-guard.sh post
 ```
@@ -69,21 +69,17 @@ cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
 ```
 
-For a controlled Firecrawl restart, use the same stop/start sequence rather than restarting the entire Compose project:
+For a controlled Firecrawl restart, use the same stop/start sequence rather than restarting the entire Compose project. The bounded wait completes before verification:
 
 ```bash
 cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
-scripts/compose.sh up -d nuq-postgres redis rabbitmq playwright-service api gateway
-```
-
-Compose may report `up` before the gateway listener is ready. Poll `scripts/compose.sh ps` until `api`, `gateway`, `nuq-postgres`, `redis`, and `rabbitmq` are healthy, then run:
-
-```bash
-cd /home/kang/docker/firecrawl
+scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq playwright-service api gateway
 scripts/verify-local.sh
 scripts/resource-guard.sh post
 ```
+
+Compose's `--wait --wait-timeout 300` waits for services to be running or healthy before returning. A prior Task 9 recovery recorded a transient `healthz: ERROR` while the gateway was still `starting`; that historical result is expected before the bounded wait and is not a reason to restart a healthy stack. If the 300-second deadline expires, collect `scripts/compose.sh ps` and non-secret service logs, then stop rather than treating the verification as a passed or ordinary transient start.
 
 Do not use `docker compose down` for routine maintenance. The stop/start recovery above leaves all named volumes attached.
 
@@ -159,23 +155,51 @@ Never transmit the generated key through Telegram, a ticket, a commit, or a comm
 
 ## Rotating the Firecrawl key
 
-Key rotation is a coordinated change because both the gateway and Open WebUI use the key. Schedule a short outage, make a fresh Firecrawl and Open WebUI backup, and stop only the gateway and Open WebUI before replacing the key.
+Key rotation is a coordinated change because both the gateway and Open WebUI use the key. Schedule a short outage, make a fresh Firecrawl and Open WebUI backup, and stop only the gateway and Open WebUI before replacing the key. The backup gate below must complete successfully before any persisted Open WebUI retrieval setting is changed; do not continue to the stop or mutation steps if it exits nonzero. No secret, database value, or backup contents are printed.
 
-1. Record the current git revision and create a Firecrawl backup:
+1. Confirm the installed Compose wait contract, record the current revision, and create hard-gated Firecrawl and Open WebUI backups:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
+scripts/compose.sh up --help | python3 -c 'import sys; t=sys.stdin.read(); missing=[x for x in ("--wait", "--wait-timeout") if x not in t]; print("Firecrawl Compose wait flags: PASS" if not missing else "missing=" + ",".join(missing)); raise SystemExit(bool(missing))'
+docker compose -f /home/kang/docker/open-webui/compose.yaml up --help | python3 -c 'import sys; t=sys.stdin.read(); missing=[x for x in ("--wait", "--wait-timeout") if x not in t]; print("Open WebUI Compose wait flags: PASS" if not missing else "missing=" + ",".join(missing)); raise SystemExit(bool(missing))'
 git rev-parse HEAD
 scripts/backup.sh
+umask 077
+BACKUP_ROOT=/home/kang/docker/firecrawl/backups/open-webui
+BACKUP_DIR="/home/kang/docker/firecrawl/backups/open-webui/$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 700 "$BACKUP_DIR"
+cp -- /home/kang/docker/open-webui/compose.yaml "$BACKUP_DIR/compose.yaml"
+chmod 600 "$BACKUP_DIR/compose.yaml"
+OPEN_WEBUI_CONTAINER="$(docker compose -f /home/kang/docker/open-webui/compose.yaml ps -q open-webui)"
+test -n "$OPEN_WEBUI_CONTAINER"
+TMP_IN_CONTAINER=/tmp/task-9-open-webui-webui.db
+cleanup_open_webui_tmp() { docker exec "$OPEN_WEBUI_CONTAINER" rm -f -- "$TMP_IN_CONTAINER" >/dev/null 2>&1 || true; }
+trap cleanup_open_webui_tmp EXIT
+docker exec "$OPEN_WEBUI_CONTAINER" rm -f -- "$TMP_IN_CONTAINER"
+docker exec "$OPEN_WEBUI_CONTAINER" python3 -c 'import sqlite3, sys; source=sqlite3.connect("file:/app/backend/data/webui.db?mode=ro", uri=True); target=sqlite3.connect(sys.argv[1]); source.backup(target); target.close(); source.close()' "$TMP_IN_CONTAINER"
+docker cp "$OPEN_WEBUI_CONTAINER:$TMP_IN_CONTAINER" "$BACKUP_DIR/webui.db"
+chmod 600 "$BACKUP_DIR/webui.db"
+docker exec "$OPEN_WEBUI_CONTAINER" rm -f -- "$TMP_IN_CONTAINER"
+trap - EXIT
+python3 -c 'import sqlite3, sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro", uri=True); result=c.execute("PRAGMA integrity_check").fetchone()[0]; c.close(); print("Open WebUI SQLite integrity: "+result); raise SystemExit(0 if result == "ok" else 1)' "$BACKUP_DIR/webui.db"
+(
+  cd "$BACKUP_DIR"
+  sha256sum compose.yaml webui.db > SHA256SUMS
+  chmod 600 SHA256SUMS
+  sha256sum -c SHA256SUMS
+)
 ```
+
+The sequence uses SQLite's online backup API inside the running `open-webui` container, copies only the temporary database to the mode-`700` backup directory, removes the in-container temporary copy, keeps `compose.yaml`, `webui.db`, and `SHA256SUMS` mode `600`, and aborts on any failed checksum or read-only `PRAGMA integrity_check`.
 
 2. Stop the two consumers. Do not stop SearXNG, Nextcloud, Hermes, or other services:
 
 ```bash
 cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway
-cd /home/kang/docker/open-webui
-docker compose stop open-webui
+docker compose -f /home/kang/docker/open-webui/compose.yaml stop open-webui
 ```
 
 3. Generate a new 256-bit hex key into a mode-`600` temporary file and atomically replace only `api.env`. The key is never printed:
@@ -190,12 +214,14 @@ mv -f -- "$temporary" secrets/api.env
 stat -c '%a %n' secrets/api.env
 ```
 
-4. Start Open WebUI and update its persisted five-key retrieval configuration from the container environment. The helper source is piped in; the new key is not a command-line argument and is not printed:
+4. Start Open WebUI with a bounded wait and update its persisted five-key retrieval configuration from the container environment. The helper source is piped in; the new key is not a command-line argument and is not printed:
 
 ```bash
-cd /home/kang/docker/open-webui
-docker compose up -d --no-deps open-webui
 cd /home/kang/docker/firecrawl
+docker compose -f /home/kang/docker/open-webui/compose.yaml \
+  --env-file /home/kang/docker/open-webui/.env \
+  --env-file /home/kang/docker/firecrawl/secrets/api.env \
+  up -d --wait --wait-timeout 300 --no-deps open-webui
 docker compose -f /home/kang/docker/open-webui/compose.yaml \
   --env-file /home/kang/docker/open-webui/.env \
   --env-file /home/kang/docker/firecrawl/secrets/api.env \
@@ -203,10 +229,10 @@ docker compose -f /home/kang/docker/open-webui/compose.yaml \
   'FIRECRAWL_API_BASE_URL=http://firecrawl-gateway:8080 \
    OPEN_WEBUI_DB_PATH=/app/backend/data/webui.db \
    python3 -' < scripts/configure-open-webui.py
-scripts/compose.sh up -d gateway
+scripts/compose.sh up -d --wait --wait-timeout 300 gateway
 ```
 
-If the Open WebUI container does not contain Python, use the repository's existing migration procedure to run `scripts/configure-open-webui.py` against the mounted Open WebUI database; do not put the key in a command argument or temporary world-readable file.
+If the Open WebUI container does not contain Python, use the repository's existing migration procedure to run `scripts/configure-open-webui.py` against the mounted Open WebUI database; do not put the key in a command argument or temporary world-readable file. If either wait command reaches its 300-second deadline, stop and collect non-secret status/log diagnostics instead of running the persisted-setting mutation or verification as if startup had succeeded.
 
 5. Verify the new key without exposing it, then run the local and Open WebUI checks:
 
@@ -214,9 +240,8 @@ If the Open WebUI container does not contain Python, use the repository's existi
 cd /home/kang/docker/firecrawl
 scripts/verify-local.sh
 scripts/resource-guard.sh post
-cd /home/kang/docker/open-webui
+docker compose -f /home/kang/docker/open-webui/compose.yaml logs --since=5m open-webui | python3 -c 'import sys; raise SystemExit(0 if "firecrawl" in sys.stdin.read() else 1)'
 curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null
-docker compose logs --since=5m open-webui | grep -F 'firecrawl' || true
 ```
 
 A rotation is complete only when gateway readiness is `200` with the new key, the old key is rejected, persisted Open WebUI settings report `web.loader.firecrawl_api_key=set`, and the browser/manual search is confirmed separately.
@@ -291,7 +316,7 @@ git show --stat --oneline CANDIDATE_REF
 git diff --stat HEAD...CANDIDATE_REF
 ```
 
-Replace `CANDIDATE_REF` only after reviewing its Compose, migrations, image tags, health checks, resource settings, and release notes. Create or switch to a dedicated local branch; do not modify global Git configuration.
+Replace `CANDIDATE_REF` only after reviewing its Compose, migrations, image tags, health checks, resource settings, and release notes. Create or switch to a dedicated local branch; do not modify global Git configuration. Every direct runtime image refreshed below must remain digest-pinned; stop if the reviewed Compose renders a floating image.
 
 2. Back up and record the current revision:
 
@@ -303,7 +328,26 @@ scripts/resource-guard.sh pre
 scripts/compose.sh config --quiet
 ```
 
-3. Rebuild source images one at a time with the pre-build resource guard between each build. Direct images may be pulled only after review:
+3. After the candidate review, pull direct runtime images sequentially. The resource guard runs between every pull; no floating image is accepted:
+
+```bash
+cd /home/kang/docker/firecrawl
+for service in redis rabbitmq gateway; do
+  image="$(scripts/compose.sh config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service")"
+  case "$image" in
+    *@sha256:*) printf 'reviewed digest-pinned image: %s=%s\n' "$service" "$image" ;;
+    *) printf 'refusing non-digest-pinned image for %s\n' "$service" >&2; exit 1 ;;
+  esac
+done
+COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh pull redis
+scripts/resource-guard.sh pre
+COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh pull rabbitmq
+scripts/resource-guard.sh pre
+COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh pull gateway
+scripts/resource-guard.sh pre
+```
+
+4. Rebuild source images one at a time with the pre-build resource guard between each build:
 
 ```bash
 cd /home/kang/docker/firecrawl
@@ -315,15 +359,53 @@ COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh build api
 scripts/resource-guard.sh pre
 ```
 
-4. Stop and start Firecrawl only, preserving the existing volumes:
+5. Inspect and record the direct image IDs and repository digests before restarting. This records the reviewed, pulled images without printing credentials:
+
+```bash
+cd /home/kang/docker/firecrawl
+install -d -m 700 state
+umask 077
+record_upgrade_images() {
+  destination="$1"
+  : > "$destination"
+  for service in redis rabbitmq gateway; do
+    image="$(scripts/compose.sh config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service")"
+    test -n "$image"
+    case "$image" in
+      *@sha256:*) ;;
+      *) printf 'refusing non-digest-pinned image for %s\n' "$service" >&2; return 1 ;;
+    esac
+    printf 'service=%s image=%s ' "$service" "$image" >> "$destination"
+    docker image inspect "$image" --format 'image_id={{.Id}} repo_digests={{join .RepoDigests ","}}' >> "$destination"
+  done
+}
+record_upgrade_images state/upgrade-images-before.txt
+```
+
+6. Stop and start Firecrawl only, preserving the existing volumes. The bounded wait must complete before the post-upgrade gates:
 
 ```bash
 cd /home/kang/docker/firecrawl
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
-scripts/compose.sh up -d nuq-postgres redis rabbitmq playwright-service api gateway
+scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq playwright-service api gateway
+record_upgrade_images() {
+  destination="$1"
+  : > "$destination"
+  for service in redis rabbitmq gateway; do
+    image="$(scripts/compose.sh config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service")"
+    test -n "$image"
+    case "$image" in
+      *@sha256:*) ;;
+      *) printf 'refusing non-digest-pinned image for %s\n' "$service" >&2; return 1 ;;
+    esac
+    printf 'service=%s image=%s ' "$service" "$image" >> "$destination"
+    docker image inspect "$image" --format 'image_id={{.Id}} repo_digests={{join .RepoDigests ","}}' >> "$destination"
+  done
+}
+record_upgrade_images state/upgrade-images-after.txt
 ```
 
-5. Wait for health, then rerun the complete repository and runtime gates:
+7. Rerun the complete repository and runtime gates:
 
 ```bash
 cd /home/kang/docker/firecrawl
@@ -336,7 +418,7 @@ scripts/resource-guard.sh post
 git diff --check
 ```
 
-Do not upgrade through an unreviewed floating `latest`, do not recreate unrelated services, and do not run `docker compose down -v`. If any gate fails, stop the Firecrawl application services and follow the full rollback procedure below.
+Do not upgrade through an unreviewed floating `latest`, do not recreate unrelated services, and do not run `docker compose down -v`. If any gate fails, stop the Firecrawl application services and follow the full rollback procedure below. Keep both image-record files with the deployment evidence.
 
 ## Disable only Firecrawl Funnel port 10000
 
@@ -368,31 +450,56 @@ scripts/verify-funnel.sh state/pre-deploy-tailscale.json
 
 ## Roll Open WebUI back to direct SearXNG
 
-The Open WebUI cutover backup contains a timestamped `compose.yaml` and SQLite `webui.db`. Use the backup made immediately before the Firecrawl cutover, not an unverified copy. This procedure changes Open WebUI only; it does not stop Firecrawl or modify Tailscale.
+The maintained Task 7 rollback backup is `/home/kang/docker/firecrawl/backups/open-webui/20260820T120549Z/`, outside the Open WebUI repository. Use that verified timestamped backup by default, or an explicitly approved timestamped directory beneath the same backup root. This procedure changes Open WebUI only; it does not stop Firecrawl or modify Tailscale.
 
-1. Set the approved backup path and verify its files and hashes:
+1. Set the approved absolute backup path, reject symlinks/non-directories, and verify its files, hashes, and SQLite integrity before stopping or restoring anything:
 
 ```bash
-cd /home/kang/docker/open-webui
+set -euo pipefail
+cd /home/kang/docker/firecrawl
 export OPEN_WEBUI_ROLLBACK_CONFIRM=YES
-BACKUP_DIR='backups/open-webui/YYYYMMDDTHHMMSSZ'
+BACKUP_ROOT=/home/kang/docker/firecrawl/backups/open-webui
+BACKUP_DIR="${OPEN_WEBUI_BACKUP_DIR:-$BACKUP_ROOT/20260820T120549Z}"
 test "$OPEN_WEBUI_ROLLBACK_CONFIRM" = YES
-test -s "$BACKUP_DIR/compose.yaml"
-test -s "$BACKUP_DIR/webui.db"
-sha256sum -c "$BACKUP_DIR/SHA256SUMS"
+case "$BACKUP_DIR" in
+  "$BACKUP_ROOT"/*) ;;
+  *) printf 'backup must remain beneath %s\n' "$BACKUP_ROOT" >&2; exit 1 ;;
+esac
+test -d "$BACKUP_DIR"
+test ! -L "$BACKUP_DIR"
+test "$(realpath -e -- "$BACKUP_DIR")" = "$BACKUP_DIR"
+for name in compose.yaml webui.db SHA256SUMS; do
+  test -f "$BACKUP_DIR/$name"
+  test ! -L "$BACKUP_DIR/$name"
+  test -s "$BACKUP_DIR/$name"
+done
+if python3 - "$BACKUP_DIR/SHA256SUMS" <<'PY'
+from pathlib import Path
+import sys
+entries = [line.split(maxsplit=1)[1] for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+raise SystemExit(0 if entries and all(Path(entry).parent == Path('.') for entry in entries) else 1)
+PY
+then
+  (cd "$BACKUP_DIR" && sha256sum -c SHA256SUMS)
+else
+  (cd /home/kang/docker/firecrawl && sha256sum -c "$BACKUP_DIR/SHA256SUMS")
+fi
+python3 -c 'import sqlite3, sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro", uri=True); result=c.execute("PRAGMA integrity_check").fetchone()[0]; c.close(); print("Open WebUI SQLite integrity: "+result); raise SystemExit(0 if result == "ok" else 1)' "$BACKUP_DIR/webui.db"
 ```
 
-2. Stop only Open WebUI, restore the timestamped Compose/DB backup, and start only Open WebUI:
+The normal rollback manifest is checked with `(cd "$BACKUP_DIR" && sha256sum -c SHA256SUMS)`. The retained Task 7 manifest records repository-relative paths, so the read-only fallback runs the same manifest from `/home/kang/docker/firecrawl`; both branches verify the exact absolute backup without changing it. Do not stop Open WebUI or copy any file until every validation command passes.
+
+2. Stop only Open WebUI, restore the timestamped Compose/DB backup using absolute paths, and start only Open WebUI with a bounded wait:
 
 ```bash
-docker compose stop open-webui
-cp -- "$BACKUP_DIR/compose.yaml" compose.yaml
+docker compose -f /home/kang/docker/open-webui/compose.yaml stop open-webui
+cp -- "$BACKUP_DIR/compose.yaml" /home/kang/docker/open-webui/compose.yaml
 docker run --rm \
   -v open-webui-data:/data \
-  -v "$PWD/$BACKUP_DIR:/backup:ro" \
+  -v "$BACKUP_DIR:/backup:ro" \
   alpine:3.20 sh -eu -c 'cp /backup/webui.db /data/webui.db'
-docker compose config --quiet
-docker compose up -d --no-deps open-webui
+docker compose -f /home/kang/docker/open-webui/compose.yaml config --quiet
+docker compose -f /home/kang/docker/open-webui/compose.yaml up -d --wait --wait-timeout 300 --no-deps open-webui
 ```
 
 3. Verify Open WebUI and direct SearXNG, while leaving the Firecrawl stack and Funnel unchanged:
@@ -400,7 +507,7 @@ docker compose up -d --no-deps open-webui
 ```bash
 until curl --fail --silent http://127.0.0.1:3000/health >/dev/null; do sleep 5; done
 curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null
-docker compose logs --since=5m open-webui searxng
+docker compose -f /home/kang/docker/open-webui/compose.yaml logs --since=5m open-webui searxng
 tailscale serve status
 ```
 
@@ -425,7 +532,7 @@ COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh build playwright-service
 scripts/resource-guard.sh pre
 COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh build api
 scripts/compose.sh stop gateway api playwright-service redis rabbitmq nuq-postgres
-scripts/compose.sh up -d nuq-postgres redis rabbitmq playwright-service api gateway
+scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq playwright-service api gateway
 scripts/verify-local.sh
 scripts/verify-funnel.sh state/pre-deploy-tailscale.json
 /usr/local/lib/hermes-agent/venv/bin/python scripts/verify-mcp.py
