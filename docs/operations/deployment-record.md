@@ -81,3 +81,22 @@ The post guard was intentionally not invoked, so the final raw snapshot is not a
 - Compose emitted repeated warnings for unset optional variables. They did not fail static validation, but should be reviewed before a production retry.
 - No Open WebUI, Tailscale, Funnel, or existing Nextcloud container was started, stopped, restarted, or modified. The pre/post Tailscale serve JSON snapshots were byte-for-byte unchanged, and the existing container IDs/statuses remained healthy.
 - Port `127.0.0.1:3002` is unused after cleanup. Stateful Firecrawl containers and their named volumes remain present; no `docker compose down` or volume deletion was performed.
+
+## Task 6 continuation: one-variable controlled retry
+
+**BLOCKED — API recovered, but the gateway health gate failed.**
+
+The retry changed exactly one runtime setting: `NUQ_WORKER_COUNT: "1"` was added to `api.environment` in `compose.the-dream-land.yaml`. No memory limit, CPU limit, concurrency value, or other resource setting was changed.
+
+- TDD RED: the new Compose invariant for `NUQ_WORKER_COUNT == "1"` failed before the Compose change with `KeyError: 'NUQ_WORKER_COUNT'`.
+- TDD GREEN: the focused invariant passed; the full deploy suite passed, 28 tests; merged Compose config passed.
+- Resource guards: `scripts/resource-guard.sh pre` passed before runtime recreation and before gateway start. The post guard was not run because the runtime health gate failed.
+- API: healthy, restart count 0, container `46ba000d0be9`; inspected environment contained exactly `NUQ_WORKER_COUNT=1`.
+- API harness: safe logs and process inspection showed one `nuq-worker-0` process (`node dist/src/services/worker/nuq-worker.js`), plus the separate queue, extract, prefetch, and reconciler processes.
+- Playwright: running during the retry, approximately 188 MiB of its 2 GiB limit, restart count 0.
+- API memory: approximately 1.55 GiB of its unchanged 3 GiB limit; host available RAM remained approximately 8.7–9.3 GiB during gateway health polling.
+- Gateway: container `12d767583d46` stayed running but unhealthy. The healthcheck reproduced `wget: can't connect to remote host (127.0.0.1): Connection refused`; the gateway log reported `/etc/nginx/templates exists, but /etc/nginx/conf.d is not writable`. `nginx -t` passed, but no listener was available on the healthcheck address. This is the observed retry blocker; no alternate setting was attempted.
+- Cleanup: only the newly recreated `api`, `playwright-service`, and `gateway` containers were stopped. NuQ PostgreSQL, Redis, and RabbitMQ remained healthy.
+- `scripts/verify-local.sh` was not run because the gateway health gate failed.
+- Existing Nextcloud, Open WebUI, Open Terminal, SearXNG, and stateful Firecrawl container identities/images/ports were unchanged and healthy. Tailscale serve JSON was byte-for-byte unchanged (SHA-256 `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070`).
+- The retry is therefore **BLOCKED**, with no further retry permitted under the one-variable controlled-retry rule.
