@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
 import sqlite3
+import time
 from typing import Mapping
 
 
@@ -36,7 +36,7 @@ def desired_config(base_url: str, api_key: str) -> dict[str, object]:
 def apply_updates(
     connection: sqlite3.Connection,
     updates: Mapping[str, object],
-    now: str,
+    now: int,
 ) -> None:
     """Upsert the allowed settings as JSON values without touching other rows."""
     unknown_keys = set(updates) - _ALLOWED_KEYS
@@ -57,8 +57,8 @@ def apply_updates(
     connection.commit()
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+def _utc_now() -> int:
+    return int(time.time())
 
 
 def main() -> int:
