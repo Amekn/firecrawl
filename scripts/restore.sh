@@ -149,7 +149,15 @@ validate_checksums
   sha256sum -c SHA256SUMS
 )
 
-mapfile -t running_containers < <(docker ps --filter name=firecrawl --format '{{.Names}}')
+running_containers_output=""
+if ! running_containers_output="$(docker ps --filter name=firecrawl --format '{{.Names}}')"; then
+  printf 'failed to query active Firecrawl containers\n' >&2
+  exit 1
+fi
+running_containers=()
+if [[ -n "$running_containers_output" ]]; then
+  mapfile -t running_containers <<< "$running_containers_output"
+fi
 if ((${#running_containers[@]})); then
   printf 'refusing restore while Firecrawl containers are running: %s\n' "${running_containers[*]}" >&2
   exit 1

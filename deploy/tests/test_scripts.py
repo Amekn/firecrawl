@@ -68,6 +68,8 @@ class DeploymentScriptTests(unittest.TestCase):
                     raise SystemExit("missing mount " + suffix)
 
                 if args[:2] == ["ps", "--filter"]:
+                    if os.environ.get("MOCK_DOCKER_PS_FAIL"):
+                        raise SystemExit(int(os.environ["MOCK_DOCKER_PS_FAIL"]))
                     running = os.environ.get("MOCK_RUNNING_CONTAINERS", "")
                     if running:
                         print(running)
@@ -390,7 +392,21 @@ class DeploymentScriptTests(unittest.TestCase):
             self.assertNotIn("resource-pre", lines)
             self.assertNotIn("docker-clear", lines)
 
-    def test_restore_rejects_unbound_checksums_and_malformed_archives_before_mutation(self) -> None:
+    def test_restore_aborts_when_active_container_probe_fails_before_safety_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            environment["MOCK_DOCKER_PS_FAIL"] = "47"
+            with self._backup_fixture() as (_, backup_argument):
+                result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = self._log_lines(log)
+            self.assertTrue(any(line.startswith("docker ps ") for line in lines), lines)
+            self.assertNotIn("resource-pre", lines)
+            self.assertFalse(any(line.startswith("compose ") for line in lines), lines)
+            self.assertNotIn("docker-clear", lines)
+            self.assertNotIn("docker-extract", lines)
+            self.assertFalse(any(line.startswith("docker volume inspect ") for line in lines), lines)
+
         for fixture_options in (
             {"missing_checksum": True},
             {"extra_checksum": True},
