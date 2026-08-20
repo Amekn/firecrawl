@@ -2,9 +2,9 @@
 
 ## Result
 
-**NEEDS_CONTEXT — all automated Task 9 backup, recovery, runtime, route, resource, service, and repository gates PASS; the Open WebUI browser search remains MANUAL-PENDING (not PASS) until the user confirms results and Firecrawl search/page-scrape logs.**
+**DONE_WITH_CONCERNS — all automated and manual Task 9 backup, recovery, runtime, route, resource, service, repository, and browser-acceptance criteria PASS. Inherited optional-variable warnings and deferred minor concerns remain documented below; no blocking acceptance failure remains.**
 
-This record retains the historical deployment attempts and concerns below. The Task 9 automated acceptance was completed against deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7` on branch `local/the-dream-land-deployment`. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; no secret value or raw Tailscale JSON is recorded.
+This record retains the historical deployment attempts and concerns below. The Task 9 automated and manual acceptance was completed against deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7` on branch `local/the-dream-land-deployment`. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; deferred minor concerns remain inherited from the prior acceptance record. No secret value or raw Tailscale JSON is recorded.
 
 ## Source and timing
 
@@ -212,7 +212,7 @@ Final runtime memory snapshot: Playwright `215 MiB / 2 GiB`, API `1.562 GiB / 3 
 
 ## Task 9 — backup, stop/start recovery, operations documentation, and final acceptance
 
-**NEEDS_CONTEXT — automated PASS; Open WebUI browser search MANUAL-PENDING (not PASS).** Completed at `2026-08-21T01:36:51+12:00` local on deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7`.
+**DONE_WITH_CONCERNS — all automated and manual criteria PASS; inherited optional-variable warnings and deferred minor concerns remain.** Completed at `2026-08-21T01:36:51+12:00` local on deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7`; browser acceptance was confirmed at `2026-08-21T02:14:58+12:00`.
 
 ### Cold backup
 
@@ -271,6 +271,13 @@ All requested automated gates passed after the documentation changes:
 | FoundationDB absence | **PASS** — no active FoundationDB container |
 | Resource threshold | **PASS** — `free -h` reported 15 GiB total and 8.5 GiB available |
 | Tailscale status capture | **PASS** — live status saved privately; post-route status hash remains `a9d86c3303e38addf567acff6630570778f0a4dba0bf3c48ca71a7883813d4d9`; baseline protected-route hash is `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070` |
-| Browser Open WebUI search | **MANUAL-PENDING — NOT PASS**; user must confirm results and Firecrawl search plus page-scrape log activity |
+| Browser Open WebUI search | **PASS** — exact query and visible sourced-result confirmation recorded below; safe Firecrawl SearXNG search and page-scrape/Playwright markers confirmed |
+
+### Manual browser acceptance
+
+- Exact browser query: `What is Firecrawl self-hosting?`
+- Visible result confirmation: the user confirmed that Open WebUI visibly displayed sourced results.
+- Confirmation timestamp: `2026-08-21T02:14:58+12:00`.
+- Safe controller read-only Firecrawl log markers confirmed SearXNG search plus page-scrape/Playwright success: `Using searxng search`; `runWebScraper called`; `running scrapeURL`; `Scraping URL`; `Scraping via playwright`; `Scrape via playwright deemed successful`.
 
 No secrets, raw Tailscale JSON, or response bodies were added to this record. No restore was run, no Tailscale route was altered during Task 9, no unrelated service was restarted, no global Git configuration was changed, and no push was performed.
