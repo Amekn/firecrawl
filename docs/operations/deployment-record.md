@@ -2,9 +2,54 @@
 
 ## Result
 
-**DONE_WITH_CONCERNS — all automated and manual Task 9 backup, recovery, runtime, route, resource, service, repository, and browser-acceptance criteria PASS. Inherited optional-variable warnings and deferred minor concerns remain documented below; no blocking acceptance failure remains.**
+**DONE_WITH_CONCERNS — the final whole-branch fix wave passed the complete automated/runtime/network/backup gates. Inherited optional-variable warnings and the documented external-download provenance limitation remain concerns; no blocking acceptance failure remains.**
 
-This record retains the historical deployment attempts and concerns below. The Task 9 automated and manual acceptance was completed against deployed commit `9511633eb42110fadd11919591dd44fc5b1e7df7` on branch `local/the-dream-land-deployment`. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; deferred minor concerns remain inherited from the prior acceptance record. No secret value or raw Tailscale JSON is recorded.
+This record retains the historical deployment attempts and concerns below. The final runtime was verified from source commit `053e71397ee378fdefa7a4098fb9b68af5d964ed` on branch `local/the-dream-land-deployment`; the final documentation head is a later documentation-only commit and is not a runtime revision. Existing Compose unset-variable warnings remain documented as non-blocking optional/default behavior; no secret value or raw Tailscale JSON is recorded.
+
+## Final whole-branch fix wave
+
+**Result: DONE_WITH_CONCERNS.** The final fix wave was applied after the source fix commit, with fresh backups and bounded rollback gates. No rollback was needed because every final network/runtime/acceptance gate passed.
+
+### Source, timing, and generated files
+
+- Runtime source commit: `053e71397ee378fdefa7a4098fb9b68af5d964ed` (backup-stream privacy correction included).
+- Final documentation head: the later docs commit containing this record, the external README update reference, and the final report; it is documentation-only and must not be used as the deployed runtime revision.
+- Fresh fixed Firecrawl backup: `/home/kang/docker/firecrawl/backups/20260820T152048Z/`.
+- Fresh Open WebUI rollback backup: `/home/kang/docker/firecrawl/backups/open-webui/20260820T150716Z/`.
+- Final acceptance snapshot: `2026-08-20T15:22:20Z` (local `2026-08-21T03:22:20+12:00`). Final runtime evidence was recorded at `2026-08-20T15:23:19Z` in ignored `state/final-fix-runtime-evidence.txt`.
+- `.env`, `secrets/api.env`, `secrets/stack.env`, and ignored `state/` evidence files remain generated/local-only; their values are not recorded.
+
+### Fresh backup evidence
+
+- Firecrawl backup directory mode `700`; `manifest.txt` and `SHA256SUMS` mode `600`; all three archives mode `600`.
+- Firecrawl archive SHA-256: `postgres.tar.gz` `7bfe7b90f696294827182189daa97171dc404a1a5a63382498bc4ad0d53e56e2`; `rabbitmq.tar.gz` `856fb5c12523d6f44b1bec52e912153d885f817cea952cde7cb30933af9ec945`; `redis.tar.gz` `64786ef96d4214ae5bd904952cb85564cc0be91ced037b77a0e9f5cc459e209d`.
+- Firecrawl `SHA256SUMS` and manifest archive-hash entries verified; all three `tar -tzf` listings passed. The fixed backup restarted stateful then application tiers with `--wait --wait-timeout 300`, ran local verification, and ran the post resource guard before printing success.
+- Open WebUI backup directory mode `700`; `compose.yaml`, `webui.db`, and `SHA256SUMS` mode `600`; SQLite online backup passed `PRAGMA integrity_check=ok`; checksums passed. `compose.yaml` SHA-256: `fc4c0e01c78f7503ebec2b368eb31d0a75a0ea2d479b75eed640f41b056b406d`; `webui.db` SHA-256: `1f97ec98de26f98b65de2962c26a0d806bc9532ad9a3ed917ce79962708d1789`.
+
+### Source image provenance
+
+- `firecrawl-nuq-postgres` image ID/digest: `sha256:3eec9c6240ed0e7f2949293f9573dd393015d273cfeb7c9e50f250ead7c2450b`.
+- `firecrawl-playwright-service` image ID/digest: `sha256:ea984f1740dd210fe115cf33841a4491af602566327937e8c52eab2dbf5eaf69`.
+- `firecrawl-api` image ID/digest: `sha256:3e88b75d9ff48f6ad04cd40589a3e2a399b679c8071d33aa1773df11d2b1d6e7`.
+- Reviewed immutable build bases resolved and were used: Node `node:22-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436`; PostgreSQL `postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449`; Go `golang:1.24@sha256:d2d2bc1c84f7e60d7d2438a3836ae7d0c847f4888464e7ec9ba3a1339a1ee804`.
+- Builds were sequential with pre-resource guards between `nuq-postgres`, `playwright-service`, and `api`; named volumes were preserved. Versioned external build downloads remain a separate provenance limitation; no invented checksums are claimed.
+
+### Network and runtime acceptance
+
+- `firecrawl-search-network`: `internal=true`, exact members `firecrawl-api-1,searxng`.
+- `open-webui-network`: API absent; members were gateway, Open WebUI, and SearXNG. Open WebUI could not resolve `api`; authenticated gateway reachability returned `200`; API→SearXNG health returned `200`.
+- External `/home/kang/docker/open-webui/compose.yaml`: only SearXNG was added to external `firecrawl-search` (`name: firecrawl-search-network`); Open WebUI was not attached. External merged-Compose test passed.
+- All six Firecrawl services were running/healthy as applicable after source-image recreation; FoundationDB was absent; all three named volumes remained present and attached.
+- Local verification passed health/readiness `401/401/200`, search, Markdown scrape, and SearXNG evidence. Open WebUI health and read-only five-setting persisted configuration passed; only `firecrawl_api_key=set` was reported.
+- Funnel verification passed public `401/200` and exact route preservation. Live Tailscale status hash remained `a9d86c3303e38addf567acff6630570778f0a4dba0bf3c48ca71a7883813d4d9`; no 443/8443 route change was made. The historical browser criterion was not re-invented; safe internal Open WebUI/gateway/search/scrape checks passed.
+- MCP verifier passed exact pinned adapter/search with `tools: 27` and `PASS`.
+- Final post resource guard passed with approximately 8.1 GiB available RAM and 2.0 GiB swap used of 8.0 GiB; rapid-growth gate is `131072 KiB/minute`.
+
+### Historical timing clarification and concerns
+
+- Initial Task 8 verifier timestamp: `2026-08-21T00:50:39+12:00` (historical pre-final-MCP-fix evidence). Final verifier timestamp: `2026-08-21T03:22:20+12:00`.
+- The pre-existing Compose warning inventory remains intentionally documented as optional/out-of-scope or PostgreSQL-default behavior; warning elimination was not required by this wave.
+- The API Dockerfile's versioned external build downloads remain a separate provenance limitation despite immutable base pins; the runbook records this explicitly.
 
 ## Source and timing
 
@@ -81,7 +126,7 @@ The final read-only `scripts/compose.sh config --quiet` check emitted repeated w
 | `TEST_API_KEY` | Intentionally optional / out-of-scope | Optional test/integration credential; not required by the verified local checks. |
 | `NUQ_BACKEND` | PostgreSQL-default behavior | Blank selects the default PostgreSQL queue path; the `nuq-postgres` service was healthy and the FoundationDB profile was not enabled. |
 
-Source interpolation sites are the bare optional references in `docker-compose.yaml:38-59,70-74`. The defaulted PostgreSQL variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, and `POSTGRES_PORT`) did not warn and retain their documented defaults.
+Source interpolation sites are the bare optional references in `docker-compose.yaml:38-59,70-74`. In the local deployment, `POSTGRES_USER` and `POSTGRES_PASSWORD` are intentionally supplied through the generated `secrets/stack.env`; `POSTGRES_DB=postgres`, `POSTGRES_HOST`, and `POSTGRES_PORT` retain their documented defaults. No secret values are recorded.
 
 ## Historical initial attempt — container outcome
 
