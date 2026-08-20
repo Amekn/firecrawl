@@ -79,6 +79,16 @@ class ComposeInvariantTests(unittest.TestCase):
             if service_name != "gateway":
                 self.assertEqual(service.get("ports", []), [], service_name)
 
+    def test_gateway_tmpfs_entries_are_uid_gid_and_mode_pinned(self) -> None:
+        self.assertEqual(
+            self.model["services"]["gateway"]["tmpfs"],
+            [
+                "/tmp:uid=101,gid=101,mode=1777",
+                "/var/cache/nginx:uid=101,gid=101,mode=0755",
+                "/etc/nginx/conf.d:uid=101,gid=101,mode=0755",
+            ],
+        )
+
     def test_api_networks_and_required_external_network(self) -> None:
         services = self.model["services"]
         self.assertEqual(set(services["api"]["networks"]), {"backend", "open-webui"})
