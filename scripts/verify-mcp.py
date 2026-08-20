@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 from pathlib import Path
 import os
 import sys
@@ -18,21 +17,6 @@ API_ENV_FILE = Path(
 URL = os.environ.get(
     "FIRECRAWL_MCP_URL", "https://the-dream-land.taile6fad0.ts.net:10000"
 )
-
-
-class BoundedStderr(io.StringIO):
-    """Capture child diagnostics without forwarding unbounded stderr output."""
-
-    def __init__(self, limit: int = 4096) -> None:
-        super().__init__()
-        self._remaining = limit
-
-    def write(self, value: str) -> int:
-        if self._remaining > 0:
-            captured = value[: self._remaining]
-            super().write(captured)
-            self._remaining -= len(captured)
-        return len(value)
 
 
 def read_api_key(path: Path) -> str:
@@ -63,20 +47,21 @@ async def verify(key: str) -> int:
         args=["-y", "firecrawl-mcp"],
         env={**os.environ, "FIRECRAWL_API_URL": URL, "FIRECRAWL_API_KEY": key},
     )
-    async with stdio_client(server, errlog=BoundedStderr()) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            tool_names = {tool.name for tool in tools.tools}
-            if "firecrawl_search" not in tool_names:
-                raise RuntimeError("firecrawl_search tool is unavailable")
-            result = await session.call_tool(
-                "firecrawl_search", {"query": "Firecrawl self hosting", "limit": 2}
-            )
-            if getattr(result, "isError", False):
-                raise RuntimeError("firecrawl_search returned an error")
-            print(f"tools: {len(tools.tools)}")
-            print("PASS")
+    with open(os.devnull, "w", encoding="utf-8") as errlog:
+        async with stdio_client(server, errlog=errlog) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                tool_names = {tool.name for tool in tools.tools}
+                if "firecrawl_search" not in tool_names:
+                    raise RuntimeError("firecrawl_search tool is unavailable")
+                result = await session.call_tool(
+                    "firecrawl_search", {"query": "Firecrawl self hosting", "limit": 2}
+                )
+                if getattr(result, "isError", False):
+                    raise RuntimeError("firecrawl_search returned an error")
+                print(f"tools: {len(tools.tools)}")
+                print("PASS")
     return 0
 
 
