@@ -89,6 +89,7 @@ class DeploymentScriptTests(unittest.TestCase):
                             payload = b"mock backup data\n"
                             info.size = len(payload)
                             stream.addfile(info, __import__("io").BytesIO(payload))
+                        backup_path.chmod(0o644)
                         raise SystemExit(0)
                     if "tar -tzf /backup/" in command:
                         if os.environ.get("MOCK_DOCKER_FAIL_STAGE") == "preflight":
@@ -517,6 +518,8 @@ class DeploymentScriptTests(unittest.TestCase):
                 self.assertLess(lines.index(stateful_up), lines.index(application_up))
                 self.assertLess(lines.index(application_up), lines.index("verify"))
                 self.assertLess(lines.index("verify"), lines.index("resource-post"))
+                for archive in output_dir.glob("*.tar.gz"):
+                    self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
                 self.assertIn("backup created:", result.stdout)
                 manifest = (output_dir / "manifest.txt").read_text(encoding="utf-8")
                 checksums = (output_dir / "SHA256SUMS").read_text(encoding="utf-8")
