@@ -95,6 +95,7 @@ class ComposeInvariantTests(unittest.TestCase):
         api_environment = self.model["services"]["api"]["environment"]
         self.assertEqual(api_environment["SEARXNG_ENDPOINT"], "http://searxng:8080")
         self.assertEqual(api_environment["NUM_WORKERS_PER_QUEUE"], "1")
+        self.assertEqual(api_environment["NUQ_WORKER_COUNT"], "1")
         self.assertIn("postgres-data", self.model["volumes"])
         self.assertIn("redis-data", self.model["volumes"])
         self.assertIn("rabbitmq-data", self.model["volumes"])
