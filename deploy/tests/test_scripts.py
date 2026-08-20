@@ -868,10 +868,12 @@ class DeploymentScriptTests(unittest.TestCase):
             (fake_packages / "mcp" / "client" / "stdio.py").write_text(
                 textwrap.dedent(
                     """
+                    import os
                     from contextlib import asynccontextmanager
 
                     @asynccontextmanager
                     async def stdio_client(server, *, errlog):
+                        os.fstat(errlog.fileno())
                         errlog.write('child warning with mcp-secret-that-must-not-be-printed\\n')
                         yield type('Read', (), {'env': server.env})(), object()
                     """
