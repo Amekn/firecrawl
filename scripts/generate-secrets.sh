@@ -16,5 +16,5 @@ for path, key in (
 ):
     if not path.exists():
         path.write_text(f"{key}={secrets.token_hex(32)}\n")
-        path.chmod(0o600)
+    path.chmod(0o600)
 PY

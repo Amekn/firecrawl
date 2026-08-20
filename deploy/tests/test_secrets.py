@@ -61,6 +61,29 @@ class SecretGenerationTests(unittest.TestCase):
             )
             self.assertEqual(second_hashes, first_hashes)
 
+    def test_existing_secret_permissions_are_restricted_without_regeneration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            secrets_directory = root / "secrets"
+            secrets_directory.mkdir()
+            api = secrets_directory / "api.env"
+            stack = secrets_directory / "stack.env"
+            api_contents = "FIRECRAWL_API_KEY=" + "a" * 64 + "\n"
+            stack_contents = "POSTGRES_PASSWORD=" + "b" * 64 + "\n"
+            api.write_text(api_contents)
+            stack.write_text(stack_contents)
+            api.chmod(0o644)
+            stack.chmod(0o644)
+
+            result = self.run_generator(root)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(api.read_text(), api_contents)
+            self.assertEqual(stack.read_text(), stack_contents)
+            self.assertEqual(stat.S_IMODE(api.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(stack.stat().st_mode), 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
