@@ -59,36 +59,77 @@ import json
 import sys
 
 
+PROTECTED_PORTS = ("443", "8443")
+
+
+def fail(message):
+    raise SystemExit(f"route preservation: {message}")
+
+
 def load(path):
     try:
         with open(path, encoding="utf-8") as stream:
             value = json.load(stream)
     except (OSError, ValueError, TypeError):
-        raise SystemExit("route preservation: invalid Tailscale status JSON")
+        fail("invalid Tailscale status JSON")
     if not isinstance(value, dict):
-        raise SystemExit("route preservation: status JSON must be an object")
+        fail("status JSON must be an object")
     return value
 
 
 def protected_entries(status):
-    entries = {}
-    for section in ("TCP", "Web", "AllowFunnel"):
-        section_value = status.get(section)
-        if not isinstance(section_value, dict):
-            raise SystemExit(f"route preservation: malformed {section} section")
-        entries[section] = {}
-        for port in ("443", "8443"):
-            if port not in section_value:
-                raise SystemExit(f"route preservation: missing {section} {port}")
-            value = section_value[port]
-            if section == "TCP" and (not isinstance(value, str) or not value):
-                raise SystemExit(f"route preservation: malformed {section} {port}")
-            if section == "Web" and (not isinstance(value, dict) or not value):
-                raise SystemExit(f"route preservation: malformed {section} {port}")
-            if section == "AllowFunnel" and not isinstance(value, bool):
-                raise SystemExit(f"route preservation: malformed {section} {port}")
-            entries[section][port] = value
-    return entries
+    tcp = status.get("TCP")
+    if not isinstance(tcp, dict):
+        fail("malformed TCP section")
+    for port in PROTECTED_PORTS:
+        value = tcp.get(port)
+        if not isinstance(value, dict) or not value:
+            fail(f"malformed TCP {port}")
+
+    web = status.get("Web")
+    if not isinstance(web, dict):
+        fail("malformed Web section")
+    web_keys = {}
+    for port in PROTECTED_PORTS:
+        suffix = f":{port}"
+        matches = [key for key in web if isinstance(key, str) and key.endswith(suffix)]
+        if len(matches) != 1:
+            fail(f"expected exactly one Web key ending {suffix}")
+        key = matches[0]
+        hostname = key[: -len(suffix)]
+        value = web[key]
+        if not hostname or not isinstance(value, dict) or not value:
+            fail(f"malformed Web {key}")
+        web_keys[port] = (hostname, value)
+    if web_keys["443"][0] != web_keys["8443"][0]:
+        fail("Web hostnames differ")
+    hostname = web_keys["443"][0]
+
+    allow_funnel = status.get("AllowFunnel")
+    if not isinstance(allow_funnel, dict):
+        fail("malformed AllowFunnel section")
+    if "443" in allow_funnel or any(
+        isinstance(key, str) and key.endswith(":443") for key in allow_funnel
+    ):
+        fail("protected AllowFunnel 443 must be absent")
+    if "8443" in allow_funnel:
+        fail("AllowFunnel 8443 must be host-qualified")
+    funnel_keys = [
+        key for key in allow_funnel if isinstance(key, str) and key.endswith(":8443")
+    ]
+    if len(funnel_keys) != 1:
+        fail("expected exactly one AllowFunnel key ending :8443")
+    funnel_key = funnel_keys[0]
+    if funnel_key != f"{hostname}:8443" or allow_funnel[funnel_key] is not True:
+        fail("malformed protected AllowFunnel 8443")
+
+    return {
+        "hostname": hostname,
+        "TCP": {port: tcp[port] for port in PROTECTED_PORTS},
+        "Web": {port: web[web_keys[port][0] + f":{port}"] for port in PROTECTED_PORTS},
+        "AllowFunnel": {"8443": True},
+    }
+
 
 baseline = load(sys.argv[1])
 current = load(sys.argv[2])

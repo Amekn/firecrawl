@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -180,23 +181,29 @@ class DeploymentScriptTests(unittest.TestCase):
             self.assertNotIn(secret, result.stdout + result.stderr)
             self.assertEqual(list(output_directory.iterdir()), [])
 
-    def test_funnel_verifier_preserves_443_and_8443_entries_exactly(self) -> None:
+    def test_funnel_verifier_accepts_realistic_tailscale_status_contract(self) -> None:
         funnel = SCRIPTS_DIR / "verify-funnel.sh"
+        hostname = "the-dream-land.taile6fad0.ts.net"
         baseline = {
-            "TCP": {"443": "127.0.0.1:443", "8443": "127.0.0.1:8443"},
-            "Web": {
-                "443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:443"}}},
-                "8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8443"}}},
+            "TCP": {
+                "443": {"HTTPS": True},
+                "8443": {"HTTPS": True},
             },
-            "AllowFunnel": {"443": False, "8443": True},
+            "Web": {
+                f"{hostname}:443": {
+                    "Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}},
+                },
+                f"{hostname}:8443": {
+                    "Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}},
+                },
+            },
+            "AllowFunnel": {f"{hostname}:8443": True},
         }
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             baseline_path = root / "baseline.json"
             current_path = root / "current.json"
             secret_path = root / "api.env"
-            baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
-            current_path.write_text(json.dumps(baseline), encoding="utf-8")
             secret = "test-secret-that-must-not-be-printed"
             secret_path.write_text(f"FIRECRAWL_API_KEY={secret}\n", encoding="utf-8")
             secret_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
@@ -245,82 +252,94 @@ class DeploymentScriptTests(unittest.TestCase):
                     "MOCK_TAILSCALE_JSON": str(current_path),
                 }
             )
-            result = subprocess.run(
-                ["bash", str(funnel), str(baseline_path)],
-                cwd=REPO_ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("401", result.stdout)
-            self.assertIn("200", result.stdout)
-            self.assertNotIn(secret, result.stdout + result.stderr)
 
-            changed = dict(baseline)
-            changed["Web"] = dict(baseline["Web"])
-            changed["Web"]["443"] = {"Handlers": {"/": {"Proxy": "http://changed"}}}
-            current_path.write_text(json.dumps(changed), encoding="utf-8")
-            rejected = subprocess.run(
-                ["bash", str(funnel), str(baseline_path)],
-                cwd=REPO_ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertNotIn(secret, rejected.stdout + rejected.stderr)
+            def run_verifier(current: dict, baseline_document: dict = baseline) -> subprocess.CompletedProcess[str]:
+                baseline_path.write_text(json.dumps(baseline_document), encoding="utf-8")
+                current_path.write_text(json.dumps(current), encoding="utf-8")
+                result = subprocess.run(
+                    ["bash", str(funnel), str(baseline_path)],
+                    cwd=REPO_ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotIn(secret, result.stdout + result.stderr)
+                return result
 
-            for section, port in (
+            accepted = run_verifier(baseline)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertIn("401", accepted.stdout)
+            self.assertIn("200", accepted.stdout)
+
+            unrelated = deepcopy(baseline)
+            unrelated["TCP"]["10000"] = {"HTTPS": False}
+            unrelated["Web"][f"{hostname}:10000"] = {"Handlers": {"/debug": {"Text": "ignored"}}}
+            unrelated["AllowFunnel"][f"{hostname}:10000"] = False
+            self.assertEqual(run_verifier(unrelated).returncode, 0)
+
+            changed_handler = deepcopy(baseline)
+            changed_handler["Web"][f"{hostname}:443"]["Handlers"]["/"]["Proxy"] = "http://changed"
+            self.assertNotEqual(run_verifier(changed_handler).returncode, 0)
+
+            changed_protocol = deepcopy(baseline)
+            changed_protocol["TCP"]["8443"]["HTTPS"] = False
+            self.assertNotEqual(run_verifier(changed_protocol).returncode, 0)
+
+            required_keys = (
                 ("TCP", "443"),
                 ("TCP", "8443"),
-                ("Web", "443"),
-                ("Web", "8443"),
-                ("AllowFunnel", "443"),
-                ("AllowFunnel", "8443"),
-            ):
-                missing = json.loads(json.dumps(baseline))
-                del missing[section][port]
-                current_path.write_text(json.dumps(missing), encoding="utf-8")
-                missing_result = subprocess.run(
-                    ["bash", str(funnel), str(baseline_path)],
-                    cwd=REPO_ROOT,
-                    env=environment,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertNotEqual(missing_result.returncode, 0, f"missing {section} {port}")
-                self.assertNotIn(secret, missing_result.stdout + missing_result.stderr)
+                ("Web", f"{hostname}:443"),
+                ("Web", f"{hostname}:8443"),
+                ("AllowFunnel", f"{hostname}:8443"),
+            )
+            for section, key in required_keys:
+                missing = deepcopy(baseline)
+                del missing[section][key]
+                self.assertNotEqual(run_verifier(missing).returncode, 0, f"missing {section} {key}")
 
             for malformed in (
-                {**baseline, "Web": []},
-                {**baseline, "AllowFunnel": {"443": "false", "8443": True}},
-                {**baseline, "TCP": {"443": None, "8443": "127.0.0.1:8443"}},
+                {**deepcopy(baseline), "TCP": {"443": {}, "8443": {"HTTPS": True}}},
+                {**deepcopy(baseline), "TCP": {"443": [], "8443": {"HTTPS": True}}},
+                {**deepcopy(baseline), "Web": []},
+                {**deepcopy(baseline), "Web": {f"{hostname}:443": {}, f"{hostname}:8443": {"Handlers": {}}}},
+                {**deepcopy(baseline), "AllowFunnel": []},
+                {**deepcopy(baseline), "AllowFunnel": {f"{hostname}:8443": False}},
             ):
-                current_path.write_text(json.dumps(malformed), encoding="utf-8")
-                malformed_result = subprocess.run(
-                    ["bash", str(funnel), str(baseline_path)],
-                    cwd=REPO_ROOT,
-                    env=environment,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                self.assertNotEqual(malformed_result.returncode, 0)
-                self.assertNotIn(secret, malformed_result.stdout + malformed_result.stderr)
+                self.assertNotEqual(run_verifier(malformed).returncode, 0)
 
-            current_path.write_text(json.dumps({}), encoding="utf-8")
-            empty_result = subprocess.run(
-                ["bash", str(funnel), str(current_path)],
-                cwd=REPO_ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
+            duplicate_web = deepcopy(baseline)
+            duplicate_web["Web"][f"other-host.ts.net:443"] = {"Handlers": {"/": {"Proxy": "http://other"}}}
+            self.assertNotEqual(run_verifier(duplicate_web).returncode, 0)
+
+            mismatched_web_host = deepcopy(baseline)
+            mismatched_web_host["Web"][f"{hostname}:8443"] = mismatched_web_host["Web"].pop(
+                f"{hostname}:443"
             )
+            mismatched_web_host["Web"]["other-host.ts.net:443"] = {"Handlers": {"/": {"Proxy": "http://other"}}}
+            self.assertNotEqual(run_verifier(mismatched_web_host).returncode, 0)
+
+            changed_between_documents = deepcopy(baseline)
+            changed_between_documents["Web"] = {
+                f"other-host.ts.net:443": changed_between_documents["Web"].pop(f"{hostname}:443"),
+                f"other-host.ts.net:8443": changed_between_documents["Web"].pop(f"{hostname}:8443"),
+            }
+            changed_between_documents["AllowFunnel"] = {"other-host.ts.net:8443": True}
+            self.assertNotEqual(run_verifier(changed_between_documents).returncode, 0)
+
+            extra_funnel_443 = deepcopy(baseline)
+            extra_funnel_443["AllowFunnel"][f"{hostname}:443"] = False
+            self.assertNotEqual(run_verifier(extra_funnel_443).returncode, 0)
+
+            duplicate_funnel_8443 = deepcopy(baseline)
+            duplicate_funnel_8443["AllowFunnel"]["other-host.ts.net:8443"] = True
+            self.assertNotEqual(run_verifier(duplicate_funnel_8443).returncode, 0)
+
+            wrong_funnel_hostname = deepcopy(baseline)
+            wrong_funnel_hostname["AllowFunnel"] = {"other-host.ts.net:8443": True}
+            self.assertNotEqual(run_verifier(wrong_funnel_hostname).returncode, 0)
+
+            empty_result = run_verifier({}, {})
             self.assertNotEqual(empty_result.returncode, 0)
 
     def test_mcp_verifier_uses_secret_and_calls_search_with_mock_mcp(self) -> None:
