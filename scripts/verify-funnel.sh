@@ -60,6 +60,7 @@ import sys
 
 
 PROTECTED_PORTS = ("443", "8443")
+ADDED_PORT = "10000"
 
 
 def fail(message):
@@ -77,18 +78,21 @@ def load(path):
     return value
 
 
+def section(status, name):
+    value = status.get(name)
+    if not isinstance(value, dict):
+        fail(f"malformed {name} section")
+    return value
+
+
 def protected_entries(status):
-    tcp = status.get("TCP")
-    if not isinstance(tcp, dict):
-        fail("malformed TCP section")
+    tcp = section(status, "TCP")
     for port in PROTECTED_PORTS:
         value = tcp.get(port)
         if not isinstance(value, dict) or not value:
             fail(f"malformed TCP {port}")
 
-    web = status.get("Web")
-    if not isinstance(web, dict):
-        fail("malformed Web section")
+    web = section(status, "Web")
     web_keys = {}
     for port in PROTECTED_PORTS:
         suffix = f":{port}"
@@ -105,9 +109,7 @@ def protected_entries(status):
         fail("Web hostnames differ")
     hostname = web_keys["443"][0]
 
-    allow_funnel = status.get("AllowFunnel")
-    if not isinstance(allow_funnel, dict):
-        fail("malformed AllowFunnel section")
+    allow_funnel = section(status, "AllowFunnel")
     if "443" in allow_funnel or any(
         isinstance(key, str) and key.endswith(":443") for key in allow_funnel
     ):
@@ -125,15 +127,42 @@ def protected_entries(status):
 
     return {
         "hostname": hostname,
-        "TCP": {port: tcp[port] for port in PROTECTED_PORTS},
-        "Web": {port: web[web_keys[port][0] + f":{port}"] for port in PROTECTED_PORTS},
-        "AllowFunnel": {"8443": True},
+        "TCP": tcp,
+        "Web": web,
+        "AllowFunnel": allow_funnel,
     }
 
 
 baseline = load(sys.argv[1])
 current = load(sys.argv[2])
-if protected_entries(baseline) != protected_entries(current):
-    raise SystemExit("route preservation failed: protected entries changed")
+baseline_entries = protected_entries(baseline)
+for section_name in ("TCP", "Web", "AllowFunnel"):
+    for key in baseline_entries[section_name]:
+        is_port_10000 = key == ADDED_PORT or (
+            section_name != "TCP" and isinstance(key, str) and key.endswith(f":{ADDED_PORT}")
+        )
+        if is_port_10000:
+            fail(f"baseline {section_name} must not contain port {ADDED_PORT}")
+
+current_entries = protected_entries(current)
+if baseline_entries["hostname"] != current_entries["hostname"]:
+    fail("Web hostnames changed")
+
+expected = {
+    "TCP": {**baseline_entries["TCP"], ADDED_PORT: {"HTTPS": True}},
+    "Web": {
+        **baseline_entries["Web"],
+        f"{baseline_entries['hostname']}:{ADDED_PORT}": {
+            "Handlers": {"/": {"Proxy": "http://127.0.0.1:3002"}},
+        },
+    },
+    "AllowFunnel": {
+        **baseline_entries["AllowFunnel"],
+        f"{baseline_entries['hostname']}:{ADDED_PORT}": True,
+    },
+}
+for section_name in ("TCP", "Web", "AllowFunnel"):
+    if current_entries[section_name] != expected[section_name]:
+        fail(f"{section_name} must equal baseline plus exactly port {ADDED_PORT}")
 PY
 printf 'route preservation: PASS\n'
