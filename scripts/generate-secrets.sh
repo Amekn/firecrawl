@@ -5,7 +5,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 TARGET_ROOT="${FIRECRAWL_ROOT:-$REPO_ROOT}"
 install -d -m 700 "$TARGET_ROOT/secrets"
-[[ -f "$TARGET_ROOT/.env" ]] || install -m 600 "$REPO_ROOT/.env.example" "$TARGET_ROOT/.env"
+if [[ -f "$TARGET_ROOT/.env" ]]; then
+    chmod 600 "$TARGET_ROOT/.env"
+else
+    install -m 600 "$REPO_ROOT/.env.example" "$TARGET_ROOT/.env"
+fi
 python3 - "$TARGET_ROOT" <<'PY'
 from pathlib import Path
 import secrets, sys

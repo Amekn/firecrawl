@@ -1,9 +1,9 @@
 # The-Dream-Land Firecrawl Deployment Design
 
-**Status:** Approved in chat on 2026-08-20  
-**Target host:** `the-dream-land`  
-**Deployment root:** `/home/kang/docker/firecrawl`  
-**Firecrawl release:** `v2.11.162`  
+**Status:** Approved in chat on 2026-08-20
+**Target host:** `the-dream-land`
+**Deployment root:** `/home/kang/docker/firecrawl`
+**Firecrawl release:** `v2.11.162`
 
 ## 1. Purpose
 

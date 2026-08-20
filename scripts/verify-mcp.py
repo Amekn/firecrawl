@@ -44,7 +44,7 @@ async def verify(key: str) -> int:
 
     server = StdioServerParameters(
         command="npx",
-        args=["-y", "firecrawl-mcp"],
+        args=["-y", "firecrawl-mcp@3.24.0"],
         env={**os.environ, "FIRECRAWL_API_URL": URL, "FIRECRAWL_API_KEY": key},
     )
     with open(os.devnull, "w", encoding="utf-8") as errlog:
@@ -69,9 +69,18 @@ def main() -> int:
     try:
         ensure_hermes_interpreter()
         key = read_api_key(API_ENV_FILE)
-        return asyncio.run(verify(key))
+        timeout = float(os.environ.get("FIRECRAWL_MCP_TIMEOUT_SECONDS", "180"))
+        if timeout < 0:
+            raise ValueError("invalid timeout")
+        return asyncio.run(asyncio.wait_for(verify(key), timeout=timeout))
+    except asyncio.TimeoutError:
+        print("FAIL: timeout", file=sys.stderr)
+        return 1
+    except RuntimeError:
+        print("FAIL: runtime", file=sys.stderr)
+        return 1
     except Exception:
-        print("FAIL", file=sys.stderr)
+        print("FAIL: unexpected", file=sys.stderr)
         return 1
 
 

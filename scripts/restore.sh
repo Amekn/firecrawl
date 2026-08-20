@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -79,11 +80,17 @@ COMPOSE_SCRIPT="${FIRECRAWL_COMPOSE_SCRIPT:-$SCRIPT_DIR/compose.sh}"
 BACKUP_SCRIPT="${FIRECRAWL_BACKUP_SCRIPT:-$SCRIPT_DIR/backup.sh}"
 VERIFY_LOCAL="${FIRECRAWL_VERIFY_LOCAL_SCRIPT:-$SCRIPT_DIR/verify-local.sh}"
 RESOURCE_GUARD="${FIRECRAWL_RESOURCE_GUARD_SCRIPT:-$SCRIPT_DIR/resource-guard.sh}"
+WAIT_TIMEOUT="${FIRECRAWL_WAIT_TIMEOUT_SECONDS:-${FIRECRAWL_HEALTH_TIMEOUT_SECONDS:-120}}"
+[[ "$WAIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { printf 'wait timeout must be a positive integer\n' >&2; exit 2; }
 
 manifest="$backup_dir/manifest.txt"
 checksums="$backup_dir/SHA256SUMS"
-[[ -s "$manifest" ]] || { printf 'missing or empty manifest: %s\n' "$manifest" >&2; exit 2; }
-[[ -s "$checksums" ]] || { printf 'missing or empty checksums: %s\n' "$checksums" >&2; exit 2; }
+for required_file in "$manifest" "$checksums"; do
+  [[ -f "$required_file" && ! -L "$required_file" && -s "$required_file" ]] || {
+    printf 'required backup file is missing, non-regular, symlinked, or empty: %s\n' "$required_file" >&2
+    exit 2
+  }
+done
 
 for required_manifest_field in \
   '^Git commit: .+$' \
@@ -138,7 +145,7 @@ for index in "${!volumes[@]}"; do
     printf 'manifest is missing volume mapping: %s -> %s\n' "$volume" "$archive" >&2
     exit 2
   }
-  [[ -s "$backup_dir/$archive" ]] || {
+  [[ -f "$backup_dir/$archive" && ! -L "$backup_dir/$archive" && -s "$backup_dir/$archive" ]] || {
     printf 'missing or empty archive: %s\n' "$backup_dir/$archive" >&2
     exit 2
   }
@@ -148,6 +155,36 @@ validate_checksums
   cd -- "$backup_dir"
   sha256sum -c SHA256SUMS
 )
+
+validate_archive_safety() {
+  python3 - "$1" <<'PY'
+from pathlib import Path, PurePosixPath
+import sys
+import tarfile
+
+archive = Path(sys.argv[1])
+try:
+    with tarfile.open(archive, "r:gz") as stream:
+        for member in stream:
+            name = member.name
+            path = PurePosixPath(name)
+            if name.startswith("/") or ".." in path.parts:
+                raise ValueError("unsafe archive path")
+            if member.issym() or member.islnk():
+                raise ValueError("archive links are not allowed")
+            if not (member.isfile() or member.isdir()):
+                raise ValueError("archive special files are not allowed")
+except (OSError, tarfile.TarError, ValueError) as error:
+    raise SystemExit(str(error))
+PY
+}
+
+for archive in "${archives[@]}"; do
+  validate_archive_safety "$backup_dir/$archive" || {
+    printf 'unsafe archive members: %s\n' "$archive" >&2
+    exit 2
+  }
+done
 
 running_containers_output=""
 if ! running_containers_output="$(docker ps --filter name=firecrawl --format '{{.Names}}')"; then
@@ -229,7 +266,7 @@ for service in nuq-postgres redis rabbitmq; do
   wait_for_healthy "$service"
 done
 
-"$COMPOSE_SCRIPT" up -d playwright-service api gateway
+"$COMPOSE_SCRIPT" up -d --wait --wait-timeout "$WAIT_TIMEOUT" playwright-service api gateway
 "$VERIFY_LOCAL"
 "$RESOURCE_GUARD" post
 trap - EXIT

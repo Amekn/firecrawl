@@ -22,7 +22,7 @@ services:
       SEARXNG_ENDPOINT: http://searxng:8080
     networks:
       - backend
-      - open-webui
+      - search
     depends_on:
       redis:
         condition: service_healthy
@@ -125,6 +125,9 @@ networks:
   open-webui:
     name: open-webui-network
     external: true
+  search:
+    name: firecrawl-search-network
+    internal: true
 
 volumes:
   postgres-data:

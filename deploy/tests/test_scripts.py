@@ -176,6 +176,7 @@ class DeploymentScriptTests(unittest.TestCase):
                 "FIRECRAWL_RESOURCE_GUARD_SCRIPT": str(resource_guard),
                 "FIRECRAWL_VERIFY_LOCAL_SCRIPT": str(verifier),
                 "FIRECRAWL_HEALTH_TIMEOUT_SECONDS": "2",
+                "FIRECRAWL_WAIT_TIMEOUT_SECONDS": "2",
             }
         )
         return environment, log
@@ -369,7 +370,7 @@ class DeploymentScriptTests(unittest.TestCase):
                 safety_backup_index = next(index for index, line in enumerate(lines[ps_index + 1:], ps_index + 1) if line == "resource-pre")
                 clear_index = lines.index("docker-clear")
                 stateful_up_index = next(index for index, line in enumerate(lines[clear_index + 1:], clear_index + 1) if line == "compose up -d nuq-postgres redis rabbitmq")
-                application_up_index = next(index for index, line in enumerate(lines[stateful_up_index + 1:], stateful_up_index + 1) if line == "compose up -d playwright-service api gateway")
+                application_up_index = next(index for index, line in enumerate(lines[stateful_up_index + 1:], stateful_up_index + 1) if line == "compose up -d --wait --wait-timeout 2 playwright-service api gateway")
                 self.assertLess(ps_index, safety_backup_index)
                 self.assertLess(safety_backup_index, clear_index)
                 self.assertLess(clear_index, stateful_up_index)
@@ -497,8 +498,90 @@ class DeploymentScriptTests(unittest.TestCase):
                 result = self._run_script(SCRIPTS_DIR / "backup.sh", ["--output", str(output_argument)], environment)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             lines = self._log_lines(log)
-            self.assertIn("compose up -d nuq-postgres redis rabbitmq", lines)
-            self.assertNotIn("compose up -d playwright-service api gateway", lines)
+            self.assertIn("compose up -d --wait --wait-timeout 2 nuq-postgres redis rabbitmq", lines)
+            self.assertNotIn("compose up -d --wait --wait-timeout 2 playwright-service api gateway", lines)
+
+    def test_backup_normal_restart_waits_verifies_runs_post_guard_and_records_archive_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            with self._backup_fixture() as (backup_dir, backup_argument):
+                output_argument = backup_argument.with_name(backup_dir.name + "-verified")
+                result = self._run_script(SCRIPTS_DIR / "backup.sh", ["--output", str(output_argument)], environment)
+                output_dir = REPO_ROOT / output_argument
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = self._log_lines(log)
+                stateful_up = "compose up -d --wait --wait-timeout 2 nuq-postgres redis rabbitmq"
+                application_up = "compose up -d --wait --wait-timeout 2 playwright-service api gateway"
+                self.assertIn(stateful_up, lines)
+                self.assertIn(application_up, lines)
+                self.assertLess(lines.index(stateful_up), lines.index(application_up))
+                self.assertLess(lines.index(application_up), lines.index("verify"))
+                self.assertLess(lines.index("verify"), lines.index("resource-post"))
+                self.assertIn("backup created:", result.stdout)
+                manifest = (output_dir / "manifest.txt").read_text(encoding="utf-8")
+                checksums = (output_dir / "SHA256SUMS").read_text(encoding="utf-8")
+                for line in checksums.splitlines():
+                    digest, archive = line.split(maxsplit=1)
+                    self.assertIn(f"Archive SHA-256: {digest}  {archive}", manifest)
+
+    def test_backup_verification_failure_is_nonzero_and_retains_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            environment["MOCK_DOCKER_FAIL_STAGE"] = "verify"
+            with self._backup_fixture() as (backup_dir, backup_argument):
+                output_argument = backup_argument.with_name(backup_dir.name + "-verify-failure")
+                result = self._run_script(SCRIPTS_DIR / "backup.sh", ["--output", str(output_argument)], environment)
+                output_dir = REPO_ROOT / output_argument
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue((output_dir / "postgres.tar.gz").is_file())
+                self.assertIn("verify", self._log_lines(log))
+                self.assertNotIn("backup created:", result.stdout)
+
+    def test_restore_application_start_waits_before_local_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            with self._backup_fixture() as (_, backup_argument):
+                result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = self._log_lines(log)
+            application_up = "compose up -d --wait --wait-timeout 2 playwright-service api gateway"
+            self.assertIn(application_up, lines)
+            self.assertLess(lines.index(application_up), lines.index("verify"))
+
+    def test_restore_rejects_unsafe_tar_members_before_volume_clear(self) -> None:
+        for member_name, member_type in (("/absolute.txt", "regular"), ("../escape.txt", "regular"), ("link.txt", "symlink")):
+            with self.subTest(member_name=member_name), tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+                environment, log = self._mock_runtime(Path(temporary_directory))
+                with self._backup_fixture() as (backup_dir, backup_argument):
+                    archive = backup_dir / "postgres.tar.gz"
+                    with tarfile.open(archive, "w:gz") as stream:
+                        info = tarfile.TarInfo(member_name)
+                        payload = b"unsafe\n"
+                        if member_type == "symlink":
+                            info.type = tarfile.SYMTYPE
+                            info.linkname = "/etc/passwd"
+                        else:
+                            info.size = len(payload)
+                        stream.addfile(info, __import__("io").BytesIO(payload) if member_type == "regular" else None)
+                    checksum_lines = []
+                    for name in ("postgres.tar.gz", "redis.tar.gz", "rabbitmq.tar.gz"):
+                        checksum_lines.append(f"{hashlib.sha256((backup_dir / name).read_bytes()).hexdigest()}  {name}")
+                    (backup_dir / "SHA256SUMS").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
+                    result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("docker-clear", self._log_lines(log))
+
+    def test_restore_rejects_symlinked_manifest_checksum_or_archive_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
+            environment, log = self._mock_runtime(Path(temporary_directory))
+            with self._backup_fixture() as (backup_dir, backup_argument):
+                target = backup_dir / "postgres.tar.gz"
+                replacement = backup_dir / "postgres-real.tar.gz"
+                target.rename(replacement)
+                target.symlink_to(replacement.name)
+                result = self._run_script(SCRIPTS_DIR / "restore.sh", [str(backup_argument), "--confirm"], environment)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self._log_lines(log), [])
 
     def test_restore_failure_cleanup_stops_services_after_mutation(self) -> None:
         for failure_stage in ("clear", "extract", "start", "verify"):
@@ -544,11 +627,17 @@ class DeploymentScriptTests(unittest.TestCase):
                 ("post", "6291455", "6291456", "6291457"),
             ):
                 for available, expected in ((below, False), (exact, True), (above, True)):
-                    environment["MEM_AVAILABLE_KIB"] = available
+                    current_environment = environment.copy()
+                    current_environment["MEM_AVAILABLE_KIB"] = available
+                    current_environment["SWAP_USED_KIB"] = "0"
+                    current_environment["SWAP_TIMESTAMP"] = "1000"
+                    current_environment["FIRECRAWL_SWAP_STATE_FILE"] = str(
+                        Path(temporary_directory) / f"{mode}-{available}.state"
+                    )
                     result = subprocess.run(
                         ["bash", str(guard), mode],
                         cwd=REPO_ROOT,
-                        env=environment,
+                        env=current_environment,
                         capture_output=True,
                         text=True,
                         check=False,
@@ -571,6 +660,53 @@ class DeploymentScriptTests(unittest.TestCase):
             )
             self.assertEqual(invalid.returncode, 2)
             self.assertIn("usage:", invalid.stderr)
+
+    def test_resource_guard_enforces_swap_growth_rate_and_atomic_baseline(self) -> None:
+        guard = SCRIPTS_DIR / "resource-guard.sh"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            state_dir = root / "state"
+            state_file = state_dir / "swap.state"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": environment["PATH"],
+                    "MEM_AVAILABLE_KIB": str(8 * 1024 * 1024),
+                    "FIRECRAWL_SWAP_STATE_FILE": str(state_file),
+                    "SWAP_GROWTH_THRESHOLD_KIB_PER_MINUTE": "131072",
+                }
+            )
+
+            def run(used: int, timestamp: int) -> subprocess.CompletedProcess[str]:
+                current = environment.copy()
+                current.update({"SWAP_USED_KIB": str(used), "SWAP_TIMESTAMP": str(timestamp)})
+                return subprocess.run(
+                    ["bash", str(guard), "post"],
+                    cwd=REPO_ROOT,
+                    env=current,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            first = run(100, 1000)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(stat.S_IMODE(state_file.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(state_dir.stat().st_mode), 0o700)
+            self.assertEqual(run(100 + 131071, 1060).returncode, 0)
+            baseline_after_slow = state_file.read_text(encoding="utf-8")
+            at_threshold = run(100 + 131071 + 131072, 1120)
+            self.assertNotEqual(at_threshold.returncode, 0)
+            self.assertEqual(state_file.read_text(encoding="utf-8"), baseline_after_slow)
+            above_threshold = run(100 + 131071 + 131072 + 1, 1120)
+            self.assertNotEqual(above_threshold.returncode, 0)
+            self.assertEqual(state_file.read_text(encoding="utf-8"), baseline_after_slow)
+            self.assertEqual(run(10, 1180).returncode, 0)
+            self.assertIn("10", state_file.read_text(encoding="utf-8"))
+
+            state_file.write_text("malformed state\n", encoding="utf-8")
+            malformed = run(10, 1240)
+            self.assertNotEqual(malformed.returncode, 0)
 
     def test_local_verifier_checks_auth_search_scrape_and_logs_without_live_services(self) -> None:
         verifier = SCRIPTS_DIR / "verify-local.sh"
@@ -1000,6 +1136,21 @@ class DeploymentScriptTests(unittest.TestCase):
             self.assertIn("call_tool(", text)
             self.assertIn('"firecrawl_search"', text)
             self.assertIn('"FIRECRAWL_API_KEY": key', text)
+            self.assertIn('firecrawl-mcp@3.24.0', text)
+
+            timeout_environment = environment.copy()
+            timeout_environment["FIRECRAWL_MCP_TIMEOUT_SECONDS"] = "0"
+            timeout_result = subprocess.run(
+                [str(HERMES_PYTHON), str(verifier)],
+                cwd=REPO_ROOT,
+                env=timeout_environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(timeout_result.returncode, 0)
+            self.assertEqual(timeout_result.stdout, "")
+            self.assertEqual(timeout_result.stderr, "FAIL: timeout\n")
 
     def test_mcp_verifier_rejects_wrong_interpreter_and_missing_dependency_secret_safe(self) -> None:
         verifier = SCRIPTS_DIR / "verify-mcp.py"
@@ -1025,7 +1176,7 @@ class DeploymentScriptTests(unittest.TestCase):
             )
             self.assertNotEqual(wrong_interpreter.returncode, 0)
             self.assertEqual(wrong_interpreter.stdout, "")
-            self.assertEqual(wrong_interpreter.stderr, "FAIL\n")
+            self.assertEqual(wrong_interpreter.stderr, "FAIL: runtime\n")
             self.assertNotIn(secret, wrong_interpreter.stdout + wrong_interpreter.stderr)
 
             missing_dependency = subprocess.run(
@@ -1038,7 +1189,7 @@ class DeploymentScriptTests(unittest.TestCase):
             )
             self.assertNotEqual(missing_dependency.returncode, 0)
             self.assertEqual(missing_dependency.stdout, "")
-            self.assertEqual(missing_dependency.stderr, "FAIL\n")
+            self.assertEqual(missing_dependency.stderr, "FAIL: unexpected\n")
             self.assertNotIn(secret, missing_dependency.stdout + missing_dependency.stderr)
 
     def test_mcp_verifier_selects_hermes_interpreter_in_executable_contract(self) -> None:
@@ -1046,6 +1197,20 @@ class DeploymentScriptTests(unittest.TestCase):
         self.assertEqual(text.splitlines()[0], "#!/usr/local/lib/hermes-agent/venv/bin/python")
         self.assertIn("/usr/local/lib/hermes-agent/venv/bin/python", text)
         self.assertNotRegex(text, r"(?m)^from mcp(?:\.| )", msg="mcp must be imported inside the guarded path")
+
+    def test_runbook_start_and_rollback_are_fail_closed_and_bounded(self) -> None:
+        text = (REPO_ROOT / "docs/operations/the-dream-land.md").read_text(encoding="utf-8")
+        self.assertIn("set -euo pipefail\ncd /home/kang/docker/firecrawl\nscripts/compose.sh up --help", text)
+        self.assertNotIn("alpine:3.20", text)
+        self.assertIn("BACKUP_HELPER_IMAGE", text)
+        self.assertIn("@sha256:", text)
+        self.assertIn("for (( attempt=1; attempt<=60; attempt++ )); do", text)
+        self.assertIn("FAIL: Open WebUI did not become healthy", text)
+        self.assertIn("old_key=", text)
+        self.assertIn("new_key=", text)
+        self.assertIn("web.loader.firecrawl_api_key", text)
+        self.assertIn("firecrawl_api_key=set", text)
+        self.assertNotIn("until curl --fail --silent http://127.0.0.1:3000/health", text)
 
 
 if __name__ == "__main__":

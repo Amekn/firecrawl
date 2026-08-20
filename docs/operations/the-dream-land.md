@@ -21,6 +21,8 @@ Run commands from the repository unless a block says otherwise.
 5. A cold backup is verified by checksums and tar listings. Do not run a production restore merely to prove that an archive can be extracted.
 6. Make a fresh backup before an upgrade, rollback, restore, key rotation, or Open WebUI configuration change.
 
+The trust model is intentionally narrow: the gateway is the sole Open WebUI/host/public consumer ingress, and SearXNG is the one trusted direct provider-network peer on `firecrawl-search-network`. This segmentation does not claim that every packet from a compromised SearXNG process is gateway-authenticated; the provider peer is trusted for API search traffic, while consumer ingress remains gateway-authenticated.
+
 ## Status, logs, and safe diagnostics
 
 ```bash
@@ -54,6 +56,7 @@ The PostgreSQL role and database are supplied by the container environment. If a
 Start stateful services first, then the application services. Confirm the installed Compose contract once before relying on the bounded wait flags; this is read-only and must report both options:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
 scripts/compose.sh up --help | python3 -c 'import sys; t=sys.stdin.read(); missing=[x for x in ("--wait", "--wait-timeout") if x not in t]; print("Compose wait flags: PASS" if not missing else "missing=" + ",".join(missing)); raise SystemExit(bool(missing))'
 scripts/compose.sh up -d --wait --wait-timeout 300 nuq-postgres redis rabbitmq
@@ -80,6 +83,8 @@ scripts/resource-guard.sh post
 ```
 
 Compose's `--wait --wait-timeout 300` waits for services to be running or healthy before returning. A prior Task 9 recovery recorded a transient `healthz: ERROR` while the gateway was still `starting`; that historical result is expected before the bounded wait and is not a reason to restart a healthy stack. If the 300-second deadline expires, collect `scripts/compose.sh ps` and non-secret service logs, then stop rather than treating the verification as a passed or ordinary transient start.
+
+`scripts/resource-guard.sh` enforces the exact 3 GiB pre-build and 6 GiB post-start available-RAM thresholds and a rapid swap-growth ceiling of `131072 KiB/minute` (128 MiB/minute). It stores the last valid timestamp and swap-used sample atomically in mode-`600` `state/resource-guard-swap.state` beneath the ignored mode-`700` `state/` directory; `FIRECRAWL_SWAP_STATE_FILE`, `SWAP_USED_KIB`, `SWAP_TIMESTAMP`, and `SWAP_GROWTH_THRESHOLD_KIB_PER_MINUTE` are test overrides. A malformed state or non-increasing timestamp fails closed.
 
 Do not use `docker compose down` for routine maintenance. The stop/start recovery above leaves all named volumes attached.
 
@@ -194,30 +199,31 @@ python3 -c 'import sqlite3, sys; c=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro
 
 The sequence uses SQLite's online backup API inside the running `open-webui` container, copies only the temporary database to the mode-`700` backup directory, removes the in-container temporary copy, keeps `compose.yaml`, `webui.db`, and `SHA256SUMS` mode `600`, and aborts on any failed checksum or read-only `PRAGMA integrity_check`.
 
-2. Stop the two consumers. Do not stop SearXNG, Nextcloud, Hermes, or other services:
+2. Stop the two consumers, rotate the key, update persisted settings, and verify both authentication generations. Capture the old key only in the local shell variable before the atomic replacement; the helper below feeds headers through stdin so neither key is placed in an external process argument or log:
 
 ```bash
+set -euo pipefail
 cd /home/kang/docker/firecrawl
+old_key="$(python3 - secrets/api.env <<'PY'
+from pathlib import Path
+import sys
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.startswith("FIRECRAWL_API_KEY=") and line.split("=", 1)[1]:
+        print(line.split("=", 1)[1], end="")
+        break
+else:
+    raise SystemExit("missing API key")
+PY
+)"
+test -n "$old_key"
 scripts/compose.sh stop gateway
 docker compose -f /home/kang/docker/open-webui/compose.yaml stop open-webui
-```
-
-3. Generate a new 256-bit hex key into a mode-`600` temporary file and atomically replace only `api.env`. The key is never printed:
-
-```bash
-cd /home/kang/docker/firecrawl
 umask 077
 temporary="$(mktemp secrets/api.env.XXXXXX)"
 python3 -c 'import secrets; print("FIRECRAWL_API_KEY=" + secrets.token_hex(32))' > "$temporary"
 chmod 600 "$temporary"
 mv -f -- "$temporary" secrets/api.env
-stat -c '%a %n' secrets/api.env
-```
 
-4. Start Open WebUI with a bounded wait and update its persisted five-key retrieval configuration from the container environment. The helper source is piped in; the new key is not a command-line argument and is not printed:
-
-```bash
-cd /home/kang/docker/firecrawl
 docker compose -f /home/kang/docker/open-webui/compose.yaml \
   --env-file /home/kang/docker/open-webui/.env \
   --env-file /home/kang/docker/firecrawl/secrets/api.env \
@@ -230,21 +236,72 @@ docker compose -f /home/kang/docker/open-webui/compose.yaml \
    OPEN_WEBUI_DB_PATH=/app/backend/data/webui.db \
    python3 -' < scripts/configure-open-webui.py
 scripts/compose.sh up -d --wait --wait-timeout 300 gateway
-```
+new_key="$(python3 - secrets/api.env <<'PY'
+from pathlib import Path
+import sys
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if line.startswith("FIRECRAWL_API_KEY=") and line.split("=", 1)[1]:
+        print(line.split("=", 1)[1], end="")
+        break
+else:
+    raise SystemExit("missing API key")
+PY
+)"
+test -n "$new_key"
+check_key() {
+  local key="$1"
+  printf 'header = "Authorization: Bearer %s"\n' "$key" | \
+    curl --config - --silent --show-error --output /dev/null --write-out '%{http_code}' \
+      http://127.0.0.1:3002/v0/health/readiness
+}
+old_status="$(check_key "$old_key")"
+new_status="$(check_key "$new_key")"
+test "$old_status" = 401
+test "$new_status" = 200
+printf 'key rotation auth gate: old=401 new=200\n'
 
-If the Open WebUI container does not contain Python, use the repository's existing migration procedure to run `scripts/configure-open-webui.py` against the mounted Open WebUI database; do not put the key in a command argument or temporary world-readable file. If either wait command reaches its 300-second deadline, stop and collect non-secret status/log diagnostics instead of running the persisted-setting mutation or verification as if startup had succeeded.
+docker compose -f /home/kang/docker/open-webui/compose.yaml \
+  --env-file /home/kang/docker/open-webui/.env \
+  --env-file /home/kang/docker/firecrawl/secrets/api.env \
+  exec -T open-webui python3 - <<'PY'
+import json
+import sqlite3
 
-5. Verify the new key without exposing it, then run the local and Open WebUI checks:
-
-```bash
-cd /home/kang/docker/firecrawl
+connection = sqlite3.connect("file:/app/backend/data/webui.db?mode=ro", uri=True)
+connection.execute("PRAGMA query_only=ON")
+rows = dict(connection.execute(
+    "SELECT key, value FROM config WHERE key IN (?, ?, ?, ?, ?)",
+    (
+        "web.search.engine",
+        "web.loader.engine",
+        "web.loader.firecrawl_api_url",
+        "web.loader.firecrawl_api_key",
+        "web.loader.firecrawl_timeout",
+    ),
+))
+connection.close()
+expected = {
+    "web.search.engine": "firecrawl",
+    "web.loader.engine": "firecrawl",
+    "web.loader.firecrawl_api_url": "http://firecrawl-gateway:8080",
+    "web.loader.firecrawl_timeout": "120",
+}
+if set(rows) != set(expected) | {"web.loader.firecrawl_api_key"}:
+    raise SystemExit("Open WebUI persisted setting set mismatch")
+for key, value in expected.items():
+    if json.loads(rows[key]) != value:
+        raise SystemExit("Open WebUI persisted setting mismatch")
+if not json.loads(rows["web.loader.firecrawl_api_key"]):
+    raise SystemExit("Open WebUI Firecrawl key is not set")
+print("Open WebUI settings: engine=firecrawl base_url=http://firecrawl-gateway:8080 timeout=120 firecrawl_api_key=set")
+PY
 scripts/verify-local.sh
 scripts/resource-guard.sh post
-docker compose -f /home/kang/docker/open-webui/compose.yaml logs --since=5m open-webui | python3 -c 'import sys; raise SystemExit(0 if "firecrawl" in sys.stdin.read() else 1)'
 curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null
+unset old_key new_key
 ```
 
-A rotation is complete only when gateway readiness is `200` with the new key, the old key is rejected, persisted Open WebUI settings report `web.loader.firecrawl_api_key=set`, and the browser/manual search is confirmed separately.
+A rotation is complete only when the old key returns `401`, the new key returns `200`, the read-only SQLite check validates exactly the five settings above while reporting only `firecrawl_api_key=set`, local Firecrawl verification passes, and the browser/manual search is confirmed separately. No final gate is masked with `|| true`.
 
 ## Cold backup and non-destructive inspection
 
@@ -347,7 +404,7 @@ COMPOSE_PARALLEL_LIMIT=1 scripts/compose.sh pull gateway
 scripts/resource-guard.sh pre
 ```
 
-4. Rebuild source images one at a time with the pre-build resource guard between each build:
+4. Rebuild source images one at a time with the pre-build resource guard between each build. The deployment Dockerfiles use the reviewed immutable Node, PostgreSQL, and Go base digests. Versioned external build downloads remain a separate provenance limitation; this wave records that limitation and does not invent checksums for those upstream artifacts:
 
 ```bash
 cd /home/kang/docker/firecrawl
@@ -492,12 +549,21 @@ The normal rollback manifest is checked with `(cd "$BACKUP_DIR" && sha256sum -c 
 2. Stop only Open WebUI, restore the timestamped Compose/DB backup using absolute paths, and start only Open WebUI with a bounded wait:
 
 ```bash
+set -euo pipefail
+unset BACKUP_HELPER_IMAGE
+# shellcheck disable=SC1091
+source /home/kang/docker/firecrawl/.env
+case "$BACKUP_HELPER_IMAGE" in
+  *@sha256:*) ;;
+  *) printf 'BACKUP_HELPER_IMAGE must be digest-pinned\n' >&2; exit 1 ;;
+esac
 docker compose -f /home/kang/docker/open-webui/compose.yaml stop open-webui
 cp -- "$BACKUP_DIR/compose.yaml" /home/kang/docker/open-webui/compose.yaml
 docker run --rm \
   -v open-webui-data:/data \
   -v "$BACKUP_DIR:/backup:ro" \
-  alpine:3.20 sh -eu -c 'cp /backup/webui.db /data/webui.db'
+  "$BACKUP_HELPER_IMAGE" sh -eu -c 'cp /backup/webui.db /data/webui.db'
+unset BACKUP_HELPER_IMAGE
 docker compose -f /home/kang/docker/open-webui/compose.yaml config --quiet
 docker compose -f /home/kang/docker/open-webui/compose.yaml up -d --wait --wait-timeout 300 --no-deps open-webui
 ```
@@ -505,7 +571,21 @@ docker compose -f /home/kang/docker/open-webui/compose.yaml up -d --wait --wait-
 3. Verify Open WebUI and direct SearXNG, while leaving the Firecrawl stack and Funnel unchanged:
 
 ```bash
-until curl --fail --silent http://127.0.0.1:3000/health >/dev/null; do sleep 5; done
+set -euo pipefail
+healthy=0
+for (( attempt=1; attempt<=60; attempt++ )); do
+  if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 5
+done
+if (( ! healthy )); then
+  printf 'FAIL: Open WebUI did not become healthy\n' >&2
+  docker compose -f /home/kang/docker/open-webui/compose.yaml ps open-webui >&2
+  docker compose -f /home/kang/docker/open-webui/compose.yaml logs --tail=100 open-webui >&2
+  exit 1
+fi
 curl --fail --silent --show-error http://127.0.0.1:3000/health >/dev/null
 docker compose -f /home/kang/docker/open-webui/compose.yaml logs --since=5m open-webui searxng
 tailscale serve status
