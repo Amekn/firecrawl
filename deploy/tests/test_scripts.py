@@ -51,6 +51,7 @@ class DeploymentScriptTests(unittest.TestCase):
                 r"""
                 #!/usr/bin/env python3
                 import os
+                import io
                 from pathlib import Path
                 import re
                 import tarfile
@@ -81,7 +82,18 @@ class DeploymentScriptTests(unittest.TestCase):
                     raise SystemExit(0)
                 if args[:2] == ["run", "--rm"]:
                     command = args[-1]
+                    if "tar -czf - ." in command:
+                        archive = io.BytesIO()
+                        with tarfile.open(fileobj=archive, mode="w:gz") as stream:
+                            info = tarfile.TarInfo("mock-data.txt")
+                            payload = b"mock backup data\n"
+                            info.size = len(payload)
+                            stream.addfile(info, io.BytesIO(payload))
+                        sys.stdout.buffer.write(archive.getvalue())
+                        raise SystemExit(0)
                     if "tar -czf /backup/" in command:
+                        if os.environ.get("MOCK_REQUIRE_ARCHIVE_STREAM"):
+                            raise SystemExit(77)
                         archive = re.search(r"/backup/([a-z-]+\.tar\.gz)", command).group(1)
                         backup_path = Path(mount_path(":/backup")) / archive
                         with tarfile.open(backup_path, "w:gz") as stream:
@@ -505,6 +517,7 @@ class DeploymentScriptTests(unittest.TestCase):
     def test_backup_normal_restart_waits_verifies_runs_post_guard_and_records_archive_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory, self._temporary_dotenv():
             environment, log = self._mock_runtime(Path(temporary_directory))
+            environment["MOCK_REQUIRE_ARCHIVE_STREAM"] = "1"
             with self._backup_fixture() as (backup_dir, backup_argument):
                 output_argument = backup_argument.with_name(backup_dir.name + "-verified")
                 result = self._run_script(SCRIPTS_DIR / "backup.sh", ["--output", str(output_argument)], environment)
