@@ -173,3 +173,19 @@ Final runtime memory snapshot: Playwright `215 MiB / 2 GiB`, API `1.562 GiB / 3 
 - NuQ PostgreSQL, Redis, RabbitMQ, all Nextcloud containers, Open WebUI, Open Terminal, and SearXNG retained identical pre/post container IDs, images, and statuses; stateful Firecrawl services remained healthy.
 - Tailscale serve JSON was byte-for-byte unchanged: pre/post SHA-256 `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070`.
 - No Open WebUI, Tailscale, Funnel, existing-service, or volume mutation was performed.
+
+## Task 7 — Open WebUI Firecrawl cutover
+
+**DONE_WITH_CONCERNS — the scoped Open WebUI cutover passed its runtime and safety gates.** The concern is inherited from Task 6: the Firecrawl Compose configuration continues to emit the previously documented optional-variable warnings; they did not fail validation or runtime verification.
+
+- Completed at `2026-08-20T12:10:15Z` (`2026-08-21T00:10:15+1200` local).
+- External file changed: `/home/kang/docker/open-webui/compose.yaml`. Only the `open-webui` service `env_file` and `environment` entries were changed. `searxng` remains defined, running, healthy, and unchanged.
+- Added `../firecrawl/secrets/api.env` as an `open-webui` env file and configured Firecrawl search/loader settings, internal gateway URL, 120-second timeout, five results, and two concurrent requests. Secret contents are not recorded.
+- Before cutover, created mode-0700 backup directory `backups/open-webui/20260820T120549Z/` containing non-empty `webui.db` and `compose.yaml`, plus `SHA256SUMS`. The SQLite copy was made with SQLite's backup API inside the running `open-webui` container, copied out, and passed `PRAGMA integrity_check`.
+- Backup hashes: `webui.db` `fd02fca6560de7217c760d723b9041fc0e973b0e8b857882b5f0e3025f4dfb49`; `compose.yaml` `1279d5635625aeda41481efba554b76e35db8d4fd3c9e44a460b1a72a274d8db`.
+- Repository helper/test verification: focused migration test passed; full deploy suite passed, 31 tests; Python compile and `git diff --check` passed.
+- Cutover actions used `docker compose config --quiet`, `docker compose up -d --no-deps open-webui`, the stdin-fed migration helper, and an explicit `docker compose restart open-webui`; no other Compose service was restarted.
+- Effective persisted settings after restart were verified without exposing the key: `web.search.engine=firecrawl`, `web.loader.engine=firecrawl`, `web.loader.firecrawl_api_url=http://firecrawl-gateway:8080`, `web.loader.firecrawl_timeout=120`, and `web.loader.firecrawl_api_key=set`.
+- Host Open WebUI health returned 200; internal Bearer-authenticated Firecrawl readiness returned 200; `scripts/verify-local.sh` passed health, readiness, search, scrape, and SearXNG evidence checks; `scripts/resource-guard.sh post` passed with 9.0 GiB available RAM.
+- All 17 protected non-Open-WebUI container identities and restart counts remained unchanged; protected services were running or in their pre-existing expected state. Hermes dashboard, gateway, and language-server processes remained running.
+- Tailscale serve JSON remained byte-identical, SHA-256 `93aeda22a532473e5116a138f5e1c260f2317b5ee81a26ed43967c57cafb8070`. No Funnel or Tailscale command was issued.
