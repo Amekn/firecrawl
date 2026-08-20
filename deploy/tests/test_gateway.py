@@ -15,7 +15,13 @@ class GatewayTemplateTests(unittest.TestCase):
     def test_gateway_template_contains_required_auth_proxy_controls(self) -> None:
         text = self._read_template()
 
-        self.assertIn('"Bearer ${FIRECRAWL_API_KEY}" 1;', text)
+        self.assertRegex(
+            text,
+            r'(?m)^\s*"~\^Bearer \$\{FIRECRAWL_API_KEY\}\$"\s+1;\s*$',
+            "auth map must use an anchored, case-sensitive Bearer regex",
+        )
+        self.assertNotIn('"Bearer ${FIRECRAWL_API_KEY}" 1;', text)
+        self.assertNotIn('"~*^Bearer ${FIRECRAWL_API_KEY}$" 1;', text)
         self.assertIn("return 401", text)
         self.assertIn('proxy_set_header Authorization "";', text)
         self.assertIn("proxy_pass http://api:3002;", text)
