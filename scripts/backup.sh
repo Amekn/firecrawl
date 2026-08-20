@@ -148,9 +148,9 @@ for index in "${!volumes[@]}"; do
   docker volume inspect "$volume" >/dev/null
   docker run --rm \
     -v "${volume}:/source:ro" \
-    -v "${backup_dir}:/backup" \
     "$BACKUP_HELPER_IMAGE" \
-    sh -eu -c "cd /source && tar -czf /backup/${archive} ."
+    sh -eu -c "cd /source && tar -czf - ." \
+    > "$backup_dir/$archive"
   [[ -s "$backup_dir/$archive" ]] || {
     printf 'backup archive is empty or missing: %s\n' "$backup_dir/$archive" >&2
     exit 1
